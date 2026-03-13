@@ -39,6 +39,11 @@ A smart Telegram bot for family expense tracking, powered by a **3-tier memory-a
 - **Daily Budget Alerts** — Notification when any budget exceeds 80%
 - **Memory-Augmented Reports** — Weekly summaries reference your stored goals and decisions
 
+### 🛡️ Production Guardrails
+- **Structured Confirmation** — Every record/delete tool returns a formatted `✅` confirmation string; users always see exactly what was recorded
+- **Ambiguity Rejection** — System Prompt strictly prohibits recording when amount or category is unclear; the bot will ask for clarification instead of guessing
+- **Full Debug Logging** — All critical nodes logged (`[INPUT]`, `[LLM_INTENT]`, `[TOOL_RESULT]`, `[OUTPUT]`) to `data/claw_debug.log` for real-time monitoring
+
 ### 🔧 Infrastructure
 - **MCP Tool Registry** — Pluggable tool architecture; add new skills by dropping a file (17 tools)
 - **Multi-Provider LLM** — Switch between MiniMax, OpenAI, DeepSeek, Qwen, or any OpenAI-compatible API
@@ -240,7 +245,9 @@ Bot:  好的，我记住了！我已更新你的目标：为年底日本旅行�
       [Agent auto-called: store_memory(content='决定年底去日本旅行', category='goal')]
 
 User: 打车 30
-Bot:  ✅ 已记录：交通 30.00 SGD（打车）
+Bot:  ✅ 已记录：交通 30.00 SGD
+      👤 归属：Husband
+      📝 备注：打车
       💡 提醒一下，你之前说过要存钱去日本旅行哦，打车能省则省？
       [Recalled from Tier 1 core_profile: 近期目标=年底日本旅行]
       [Recalled from Tier 3 episodic: "决定年底去日本旅行"]
@@ -408,6 +415,13 @@ The tool is automatically discovered and available to the LLM agent — no other
 | created_at | TIMESTAMP | Timestamp |
 
 ## Deployment
+
+### Monitoring
+
+```bash
+# Real-time log monitoring (all interactions, LLM calls, tool results)
+tail -f data/claw_debug.log
+```
 
 ### tmux
 ```bash

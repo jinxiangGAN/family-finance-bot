@@ -90,6 +90,19 @@ def skill_record_expense(user_id: int, user_name: str, params: dict) -> dict:
 
     budget_alert = _check_budget_alert(user_id, category)
 
+    # ── Build formatted confirmation string ──
+    confirm_parts = [f"✅ 已记录：{category} {amount:.2f} {currency}"]
+    if currency != CURRENCY:
+        confirm_parts[0] += f" → {amount_sgd:.2f} {CURRENCY}"
+    confirm_parts.append(f"👤 归属：{user_name}")
+    if note:
+        confirm_parts.append(f"📝 备注：{note}")
+    if event_tag:
+        confirm_parts.append(f"🏷 事件：{event_tag}")
+    if budget_alert:
+        confirm_parts.append(budget_alert)
+    confirmation = "\n".join(confirm_parts)
+
     result: dict[str, Any] = {
         "success": True,
         "id": row_id,
@@ -98,6 +111,7 @@ def skill_record_expense(user_id: int, user_name: str, params: dict) -> dict:
         "currency": currency,
         "note": note,
         "budget_alert": budget_alert,
+        "confirmation": confirmation,
     }
     if currency != CURRENCY:
         result["amount_sgd"] = amount_sgd
@@ -111,8 +125,13 @@ def skill_delete_last(user_id: int, user_name: str, params: dict) -> dict:
     """Delete the most recent expense."""
     deleted = delete_last_expense(user_id)
     if deleted:
+        confirmation = (
+            f"🗑 已撤销最后一笔：{deleted.category} {deleted.amount:.2f} {deleted.currency}"
+            f"（{deleted.note}）"
+        )
         return {
             "success": True,
+            "confirmation": confirmation,
             "deleted": {
                 "category": deleted.category,
                 "amount": deleted.amount,

@@ -113,8 +113,13 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
     mm = _get_memory_manager()
     builder = _get_prompt_builder()
 
+    # ── LOG: Input ──
+    logger.info("[INPUT] user=%d name=%s chat=%s msg=%s", user_id, user_name, "private" if session.is_private else "group", text)
+
     # Step 1: Assemble memory context (all 3 tiers)
     memory_context = await mm.assemble_memory_context(user_id, text)
+    if memory_context:
+        logger.info("[MEMORY] Recalled %d chars of context for user %d", len(memory_context), user_id)
 
     # Step 2: Build dynamic system prompt
     system_prompt = builder.build(
@@ -128,7 +133,10 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
 
     # Inject working memory turns for multi-turn coherence
     wm = mm.get_working_memory(user_id)
-    for past_msg in wm.get_messages():
+    wm_msgs = wm.get_messages()
+    if wm_msgs:
+        logger.info("[WORKING_MEM] Injecting %d past turns", len(wm_msgs))
+    for past_msg in wm_msgs:
         messages.append(past_msg)
 
     # Current user message
@@ -139,6 +147,7 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
 
     resp_msg, usage = await provider.chat_completion(messages, tools=tools)
     if usage:
+        logger.info("[LLM_USAGE] prompt=%d completion=%d total=%d", usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), usage.get("total_tokens", 0))
         record_usage(
             user_id,
             usage.get("prompt_tokens", 0),
@@ -150,6 +159,7 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
     tool_calls = resp_msg.get("tool_calls")
     if not tool_calls:
         reply = resp_msg.get("content", "🤔 我没有理解你的意思，请输入 /help 查看帮助。")
+        logger.info("[LLM_REPLY] No tool calls, direct reply (%d chars)", len(reply))
         # Update working memory
         mm.add_working_turn(user_id, "user", text)
         mm.add_working_turn(user_id, "assistant", reply)
@@ -166,8 +176,9 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
         except json.JSONDecodeError:
             params = {}
 
+        logger.info("[LLM_INTENT] Calling tool: %s with args: %s", tool_name, json.dumps(params, ensure_ascii=False)[:300])
         result = execute_tool(tool_name, user_id, user_name, params)
-        logger.info("Tool %s → %s", tool_name, json.dumps(result, ensure_ascii=False)[:200])
+        logger.info("[TOOL_RESULT] %s → success=%s %s", tool_name, result.get("success"), json.dumps(result, ensure_ascii=False)[:200])
 
         messages.append({
             "role": "tool",
@@ -187,6 +198,7 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
         )
 
     reply = final_msg.get("content", "操作完成。")
+    logger.info("[OUTPUT] user=%d reply=%s", user_id, reply[:200])
 
     # Step 7: Update working memory buffer
     mm.add_working_turn(user_id, "user", text)

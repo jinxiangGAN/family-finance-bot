@@ -7,10 +7,18 @@ from app.config import LLM_API_KEY, LLM_EMBEDDING_MODEL, LLM_PROVIDER, TELEGRAM_
 from app.database import init_db
 from app.telegram_bot import build_application
 
+import os as _os
+
+_log_dir = _os.path.dirname(_os.getenv("DATABASE_PATH", "data/expenses.db")) or "data"
+_os.makedirs(_log_dir, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(f"{_log_dir}/claw_debug.log", encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger(__name__)
 
