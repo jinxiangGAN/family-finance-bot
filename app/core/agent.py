@@ -105,7 +105,7 @@ async def agent_handle(text: str, user_id: int, user_name: str, session: Session
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 429:
             logger.warning("Rate limited (429) for user=%d, returning friendly message", user_id)
-            return "记账太快啦，灰灰还没转过弯来，请等 10 秒再试哦 🐾"
+            return "记账太快啦，小灰毛还没转过弯来，请等 10 秒再试哦 🐾"
         logger.exception("Agent LLM loop failed (HTTP %d), falling back", e.response.status_code)
         return _fallback_handle(text, user_id, user_name)
     except Exception:
