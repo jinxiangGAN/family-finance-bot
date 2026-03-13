@@ -14,6 +14,8 @@ import logging
 import re
 from typing import Optional
 
+import httpx
+
 from app.services.api_tracker import is_within_limit, record_usage
 from app.config import (
     CURRENCY,
@@ -100,6 +102,12 @@ async def agent_handle(text: str, user_id: int, user_name: str, session: Session
 
     try:
         return await _llm_agent_loop(text, user_id, user_name, session)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            logger.warning("Rate limited (429) for user=%d, returning friendly message", user_id)
+            return "记账太快啦，GreyClaw 还没转过弯来，请等 10 秒再试哦 🐾"
+        logger.exception("Agent LLM loop failed (HTTP %d), falling back", e.response.status_code)
+        return _fallback_handle(text, user_id, user_name)
     except Exception:
         logger.exception("Agent LLM loop failed, falling back")
         return _fallback_handle(text, user_id, user_name)
