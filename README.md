@@ -1,20 +1,31 @@
 # Family Finance Telegram Bot
 
-A smart Telegram bot for family expense tracking, powered by an LLM agent with function calling. Designed for a 2-person household to record, query, and analyze daily spending through natural language.
+A smart Telegram bot for family expense tracking, powered by a **memory-augmented LLM agent** with MCP-style pluggable tools. Designed for a 2-person household to record, query, and analyze daily spending through natural language — with long-term memory that understands your habits and goals.
 
 ## Features
 
-- **Natural Language Expense Tracking** — Send `lunch 35` or `taxi 18` to record instantly
-- **Receipt OCR** — Send a photo of a receipt and the bot auto-extracts expenses via vision model
+### 🧠 Intelligent Agent
+- **Semantic Memory** — Remembers preferences, goals, and family decisions across conversations
+- **Session-Aware Persona** — Warm and empathetic in private chat; objective in group chat
+- **Proactive Engagement** — Friday evening check-ins, daily budget alerts, memory-augmented weekly reports
+
+### 💰 Expense Tracking
+- **Natural Language** — Send `lunch 35` or `taxi 18` to record instantly
+- **Receipt OCR** — Send a photo of a receipt → vision model auto-extracts expenses
 - **Multi-Currency** — Record in SGD, CNY, USD, AUD, JPY, etc. with automatic conversion
 - **Three Query Views** — Check spending for yourself, your spouse, or the whole family
-- **Budget Management** — Set monthly budgets per category with automatic overspend alerts
 - **Event/Trip Tags** — Tag expenses for trips (e.g., "Japan Trip") with AA split summary
-- **Weekly Summary** — Automated weekly report pushed to all family members
+
+### 📊 Budget & Analysis
+- **Budget Management** — Set monthly budgets per category with automatic overspend alerts
 - **Financial Analysis & Advice** — Ask the bot for spending insights and saving tips
-- **CSV Export** — `/export` to download expense data as CSV file
+- **Weekly Summary** — Automated report pushed to all family members every Sunday
+
+### 🔧 Infrastructure
+- **MCP Tool Registry** — Pluggable tool architecture; add new skills by dropping a file
 - **Multi-Provider LLM** — Switch between MiniMax, OpenAI, DeepSeek, Qwen, or any OpenAI-compatible API
 - **API Cost Control** — Monthly token limit with automatic fallback to regex parsing
+- **CSV Export** — `/export` to download expense data
 - **Docker Ready** — One-command deployment with docker-compose
 
 ## Architecture
@@ -22,15 +33,23 @@ A smart Telegram bot for family expense tracking, powered by an LLM agent with f
 ```
 User Message (text / photo)
      ↓
-Telegram Bot (polling mode)
+Telegram Bot (polling mode, session-aware)
+     ↓
+Session Manager ← private vs group chat → persona adaptation
+     ↓
+Memory Layer ← recall relevant memories → inject into system prompt
      ↓
 LLM Agent (function calling / regex fallback)
-  ├── Text → tool dispatch
-  └── Photo → Vision OCR → tool dispatch
+  ├── Text → MCP tool dispatch
+  └── Photo → Vision OCR → MCP tool dispatch
      ↓
-Skills Layer (record, query, budget, event, export, ...)
+MCP Tool Registry (auto-discover & dispatch)
+  ├── expense_tools  (record, delete, export)
+  ├── query_tools    (totals, summary, budget, analysis)
+  ├── event_tools    (start, stop, event summary)
+  └── memory_tools   (store, recall, forget)
      ↓
-SQLite Database (expenses, budgets, events, api_usage)
+SQLite Database (expenses, budgets, events, api_usage, memories + FTS5)
 ```
 
 ## Project Structure
@@ -39,14 +58,22 @@ SQLite Database (expenses, budgets, events, api_usage)
 family-finance-bot/
 ├── app/
 │   ├── main.py              # Entry point
-│   ├── telegram_bot.py      # Bot handlers, commands, photo handler
-│   ├── agent.py             # LLM agent: text + image handling
+│   ├── telegram_bot.py      # Bot handlers, commands, scheduled jobs
+│   ├── agent.py             # LLM agent v3: memory + session + MCP
 │   ├── llm_provider.py      # Abstract LLM interface (OpenAI-compatible)
-│   ├── skills.py            # All operations as callable skill functions
+│   ├── skills.py            # Core skill implementations
+│   ├── memory.py            # Semantic memory: store, recall, FTS5 search
+│   ├── session.py           # Session management: private vs group context
 │   ├── api_tracker.py       # Token usage tracking and cost control
-│   ├── scheduler.py         # Weekly summary job
+│   ├── scheduler.py         # Scheduled jobs: weekly report, nudge, alerts
 │   ├── config.py            # Configuration from environment
-│   ├── database.py          # SQLite initialization and migrations
+│   ├── database.py          # SQLite init, migrations, FTS5
+│   ├── mcp_tools/           # MCP-style pluggable tool registry
+│   │   ├── registry.py      # Auto-discover + dispatch
+│   │   ├── expense_tools.py # Record, delete, export (3 tools)
+│   │   ├── query_tools.py   # Query, budget, analysis (6 tools)
+│   │   ├── event_tools.py   # Event/trip management (3 tools)
+│   │   └── memory_tools.py  # Memory management (3 tools)
 │   ├── models/
 │   │   └── expense.py       # Data models
 │   └── services/
@@ -167,6 +194,29 @@ Send a photo of any receipt, taxi screenshot, or food delivery bill. The bot wil
 | `hotel 120 AUD` | Records 120 AUD, converts to ~105.60 SGD |
 | `新干线 15000 日元` | Records 15000 JPY, converts to ~135 SGD |
 
+### Semantic Memory
+
+```
+User: 这个月要减少打车开支
+Bot:  好的，我记住了。你的目标是这个月减少打车开支，我会帮你留意的！
+
+User: 打车 30
+Bot:  ✅ 已记录：交通 30.00 SGD（打车）
+      💡 提醒一下，你之前说过这个月要减少打车。
+      本月打车已经花了 180 SGD，注意控制哦。
+```
+
+### Private Chat vs Group Chat
+
+```
+[Private Chat with Wife]
+Bot: 老婆，这周餐饮预算还有富裕，周末想出去吃点好的吗？🍽️
+
+[Family Group Chat]
+Bot: 📊 家庭本月支出：2,450.00 SGD
+     餐饮 980 | 交通 520 | 生活 450 | 购物 300 | 其他 200
+```
+
 ### Event/Trip Tags
 
 ```
@@ -203,6 +253,51 @@ Bot:  📊 日本旅行
 | `/delete` | Delete most recent expense |
 | `/export` | Export CSV file |
 | `/usage` | Check LLM API token usage |
+| `/memory` | View stored memories |
+
+### Proactive Scheduled Messages
+
+| Time | What happens |
+|:--|:--|
+| Friday 6PM | Budget-aware weekend check-in with personalized suggestions |
+| Daily 9PM | Alert if any budget exceeds 80% |
+| Sunday 8PM | Comprehensive weekly financial report with memory insights |
+
+## Adding New Tools (MCP Pattern)
+
+Create a new file in `app/mcp_tools/`, e.g. `calendar_tools.py`:
+
+```python
+"""MCP Tool: Calendar reminders."""
+
+def _handle_set_reminder(user_id, user_name, params):
+    # your implementation
+    return {"success": True, "message": "Reminder set!"}
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "set_reminder",
+            "description": "Set a financial reminder (e.g., rent due date)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Reminder text"},
+                    "date": {"type": "string", "description": "Date (YYYY-MM-DD)"},
+                },
+                "required": ["text", "date"],
+            },
+        },
+    },
+]
+
+HANDLERS = {
+    "set_reminder": _handle_set_reminder,
+}
+```
+
+The tool is automatically discovered and available to the LLM agent — no other code changes needed.
 
 ## Database Schema
 
@@ -233,6 +328,28 @@ Bot:  📊 日本旅行
 | user_id | INTEGER | Telegram user ID |
 | tag | TEXT | Event tag name |
 | is_active | INTEGER | Currently active (1/0) |
+
+### memories
+| Column | Type | Description |
+|:--|:--|:--|
+| id | INTEGER | Primary key |
+| user_id | INTEGER | Owner (0 = family-shared) |
+| content | TEXT | Memory text |
+| category | TEXT | preference/goal/decision/habit/reminder/general |
+| importance | INTEGER | 1-10 scale |
+| created_at | TIMESTAMP | When it was stored |
+
+> FTS5 virtual table `memories_fts` provides full-text search over memory content.
+
+### api_usage
+| Column | Type | Description |
+|:--|:--|:--|
+| user_id | INTEGER | Telegram user ID |
+| prompt_tokens | INTEGER | Prompt tokens used |
+| completion_tokens | INTEGER | Completion tokens used |
+| total_tokens | INTEGER | Total tokens |
+| model | TEXT | Model name |
+| created_at | TIMESTAMP | Timestamp |
 
 ## Deployment
 
