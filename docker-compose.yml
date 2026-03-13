@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    container_name: family-finance-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persist SQLite database on host
+      - ./data:/app/data
+    environment:
+      - DATABASE_PATH=/app/data/expenses.db

@@ -1,9 +1,11 @@
-"""LLM Agent: uses MiniMax function calling to dispatch skills.
+"""LLM Agent: uses function calling to dispatch skills.
 
 Flow:
-1. User message → LLM (with tool definitions)
+1. User message (text or image) → LLM (with tool definitions)
 2. LLM returns tool_calls → execute skills → get results
 3. Feed results back to LLM → LLM generates final human-readable reply
+
+Supports any OpenAI-compatible provider via llm_provider.py.
 """
 
 import json
@@ -11,45 +13,79 @@ import logging
 import re
 from typing import Optional
 
-import httpx
-
 from app.api_tracker import is_within_limit, record_usage
-from app.config import CURRENCY, MINIMAX_API_KEY, MINIMAX_MODEL
+from app.config import CURRENCY, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_PROVIDER, LLM_VISION_MODEL
+from app.llm_provider import create_provider
 from app.skills import TOOL_DEFINITIONS, execute_skill
 
 logger = logging.getLogger(__name__)
 
-MINIMAX_API_URL = "https://api.minimax.chat/v1/text/chatcompletion_v2"
-
 SYSTEM_PROMPT = f"""你是一个家庭记账助手机器人。这个家庭有两个人（夫妻）。
-你的默认货币是 {CURRENCY}。
+默认货币是 {CURRENCY}。
 
 你可以帮助用户：
-1. 记录日常支出（调用 record_expense）
+1. 记录日常支出（调用 record_expense），支持多币种
 2. 查询支出情况（调用 query_monthly_total / query_category_total / query_summary）
 3. 设置和查看预算（调用 set_budget / query_budget）
 4. 分析消费习惯并给出财务建议（调用 get_spending_analysis）
 5. 删除误记的支出（调用 delete_last_expense）
+6. 管理事件/旅行标签（调用 start_event / stop_event / query_event_summary）
+7. 导出数据为 CSV（调用 export_csv）
 
 回复规则：
 - 用简洁友好的中文回复
-- 金额后面带货币单位 {CURRENCY}
+- 金额后面带货币单位
+- 如果用户用非 {CURRENCY} 货币记账，回复中提示已自动折算
 - 如果 skill 返回了 budget_alert，一定要在回复中提醒用户
-- 对于财务建议，根据 get_spending_analysis 返回的数据给出具体可行的建议
 - 如果用户的消息包含多笔消费，每笔都分别调用 record_expense
+- 对于事件汇总，展示每人花费和 AA 结算建议
 """
 
+VISION_PROMPT = f"""你是一个 OCR 助手。请识别这张图片中的消费信息。
 
-async def agent_handle(
-    text: str, user_id: int, user_name: str
-) -> str:
-    """Main agent entry: process user text and return a reply string.
+提取以下信息并返回严格的 JSON（不要包含其他文字）：
+- 如果是收据/小票，提取每一项消费
+- 如果是截图（打车、外卖等），提取总金额
 
-    Falls back to simple regex if API is unavailable or over limit.
-    """
-    # Check API budget
-    if not MINIMAX_API_KEY or not is_within_limit():
-        if not MINIMAX_API_KEY:
+返回格式（数组）：
+[{{"category": "分类", "amount": 金额, "note": "备注", "currency": "货币代码"}}]
+
+可选分类：餐饮、交通、购物、娱乐、生活、医疗、其他
+默认货币：{CURRENCY}
+如果图片中有其他货币（如 ¥ 为 CNY，$ 可能是 USD 或 SGD，请根据上下文判断），请正确填写 currency 字段。
+
+如果无法识别消费信息，返回：
+[{{"error": "无法识别"}}]
+"""
+
+# Lazy-init provider
+_provider = None
+_vision_provider = None
+
+
+def _get_provider():
+    global _provider
+    if _provider is None and LLM_API_KEY:
+        _provider = create_provider(LLM_PROVIDER, LLM_API_KEY, LLM_MODEL, LLM_BASE_URL)
+    return _provider
+
+
+def _get_vision_provider():
+    global _vision_provider
+    if _vision_provider is None and LLM_API_KEY:
+        vision_model = LLM_VISION_MODEL or LLM_MODEL
+        _vision_provider = create_provider(LLM_PROVIDER, LLM_API_KEY, vision_model, LLM_BASE_URL)
+    return _vision_provider
+
+
+# ═══════════════════════════════════════════
+#  Text message handling
+# ═══════════════════════════════════════════
+
+async def agent_handle(text: str, user_id: int, user_name: str) -> str:
+    """Main agent entry for text messages."""
+    if not LLM_API_KEY or not is_within_limit():
+        if not LLM_API_KEY:
             logger.info("No API key, using fallback")
         else:
             logger.warning("API token limit reached, using fallback")
@@ -63,27 +99,25 @@ async def agent_handle(
 
 
 async def _llm_agent_loop(text: str, user_id: int, user_name: str) -> str:
-    """Run the LLM agent loop: call → tool_calls → execute → feed back → final reply."""
+    provider = _get_provider()
+    if provider is None:
+        return _fallback_handle(text, user_id, user_name)
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": text},
     ]
 
-    # Step 1: initial LLM call
-    resp_msg, usage = await _call_minimax(messages)
+    resp_msg, usage = await provider.chat_completion(messages, tools=TOOL_DEFINITIONS)
     if usage:
-        record_usage(user_id, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), usage.get("total_tokens", 0), MINIMAX_MODEL)
+        record_usage(user_id, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), usage.get("total_tokens", 0), LLM_MODEL)
 
-    # Step 2: if LLM wants to call tools, execute them
     tool_calls = resp_msg.get("tool_calls")
     if not tool_calls:
-        # LLM replied directly (e.g., for casual chat)
         return resp_msg.get("content", "🤔 我没有理解你的意思，请输入 /help 查看帮助。")
 
-    # Add assistant message with tool_calls
     messages.append(resp_msg)
 
-    # Execute each tool call
     for tc in tool_calls:
         func = tc.get("function", {})
         skill_name = func.get("name", "")
@@ -93,7 +127,7 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str) -> str:
             params = {}
 
         result = execute_skill(skill_name, user_id, user_name, params)
-        logger.info("Skill %s → %s", skill_name, result)
+        logger.info("Skill %s → %s", skill_name, json.dumps(result, ensure_ascii=False)[:200])
 
         messages.append({
             "role": "tool",
@@ -101,38 +135,90 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str) -> str:
             "content": json.dumps(result, ensure_ascii=False),
         })
 
-    # Step 3: feed results back to LLM for final reply
-    final_msg, usage2 = await _call_minimax(messages)
+    final_msg, usage2 = await provider.chat_completion(messages, tools=TOOL_DEFINITIONS)
     if usage2:
-        record_usage(user_id, usage2.get("prompt_tokens", 0), usage2.get("completion_tokens", 0), usage2.get("total_tokens", 0), MINIMAX_MODEL)
+        record_usage(user_id, usage2.get("prompt_tokens", 0), usage2.get("completion_tokens", 0), usage2.get("total_tokens", 0), LLM_MODEL)
 
     return final_msg.get("content", "操作完成。")
 
 
-async def _call_minimax(messages: list[dict]) -> tuple[dict, Optional[dict]]:
-    """Call MiniMax chat completion with function calling. Returns (message, usage)."""
-    headers = {
-        "Authorization": f"Bearer {MINIMAX_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": MINIMAX_MODEL,
-        "messages": messages,
-        "tools": TOOL_DEFINITIONS,
-        "temperature": 0.3,
-        "max_tokens": 1024,
-    }
+# ═══════════════════════════════════════════
+#  Image (Receipt OCR) handling
+# ═══════════════════════════════════════════
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(MINIMAX_API_URL, headers=headers, json=payload)
-        resp.raise_for_status()
+async def agent_handle_image(
+    image_url: str, caption: str, user_id: int, user_name: str
+) -> str:
+    """Handle an image message: OCR → record expenses."""
+    if not LLM_API_KEY or not is_within_limit():
+        return "📷 收据识别需要 LLM API，当前不可用。请手动输入记账信息。"
 
-    data = resp.json()
-    logger.debug("MiniMax response: %s", json.dumps(data, ensure_ascii=False)[:500])
+    vision = _get_vision_provider()
+    if vision is None:
+        return "📷 Vision 模型未配置，无法识别收据。"
 
-    message = data.get("choices", [{}])[0].get("message", {})
-    usage = data.get("usage")
-    return message, usage
+    try:
+        prompt = caption.strip() if caption else "请识别这张图片中的消费信息"
+        content, usage = await vision.chat_completion_with_image(
+            text=prompt,
+            image_url=image_url,
+            system_prompt=VISION_PROMPT,
+        )
+        if usage:
+            record_usage(user_id, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), usage.get("total_tokens", 0), LLM_MODEL)
+
+        # Parse OCR result
+        content = content.strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*", "", content)
+            content = re.sub(r"\s*```$", "", content)
+
+        items = json.loads(content)
+        if not isinstance(items, list):
+            items = [items]
+
+        if items and items[0].get("error"):
+            return f"📷 无法识别图片中的消费信息：{items[0]['error']}\n请手动输入。"
+
+        # Record each expense
+        replies = []
+        for item in items:
+            result = execute_skill("record_expense", user_id, user_name, {
+                "category": item.get("category", "其他"),
+                "amount": item.get("amount", 0),
+                "note": item.get("note", "收据"),
+                "currency": item.get("currency", CURRENCY),
+            })
+            if result.get("success"):
+                cur = result.get("currency", CURRENCY)
+                line = f"✅ {result['category']}  {result['amount']:.2f} {cur}"
+                if result.get("note"):
+                    line += f"（{result['note']}）"
+                if result.get("amount_sgd") and cur != CURRENCY:
+                    line += f" → {result['amount_sgd']:.2f} {CURRENCY}"
+                replies.append(line)
+                if result.get("budget_alert"):
+                    replies.append(result["budget_alert"])
+
+        if replies:
+            return "📷 收据识别成功！\n\n" + "\n".join(replies)
+        return "📷 未能从图片中提取到消费信息，请手动输入。"
+
+    except Exception:
+        logger.exception("Receipt OCR failed")
+        return "📷 收据识别失败，请手动输入记账信息。"
+
+
+# ═══════════════════════════════════════════
+#  CSV export helper (returns file content)
+# ═══════════════════════════════════════════
+
+async def agent_handle_export(user_id: int, user_name: str, scope: str = "me") -> Optional[str]:
+    """Handle /export command. Returns CSV content or None."""
+    result = execute_skill("export_csv", user_id, user_name, {"scope": scope})
+    if result.get("success"):
+        return result.get("csv_content", "")
+    return None
 
 
 # ═══════════════════════════════════════════
@@ -160,10 +246,8 @@ def _guess_category(note: str) -> str:
 
 
 def _fallback_handle(text: str, user_id: int, user_name: str) -> str:
-    """Simple regex-based handler when LLM is unavailable."""
     text = text.strip()
 
-    # Query patterns
     if "汇总" in text:
         scope = "family" if any(k in text for k in ("家庭", "总", "一共")) else "me"
         if any(k in text for k in ("老婆", "老公", "妻子", "丈夫")):
@@ -177,7 +261,6 @@ def _fallback_handle(text: str, user_id: int, user_name: str) -> str:
             scope = "family"
         elif any(k in text for k in ("老婆", "老公", "妻子", "丈夫")):
             scope = "spouse"
-        # Check category
         from app.config import CATEGORIES
         cat = None
         for c in CATEGORIES:
@@ -197,7 +280,6 @@ def _fallback_handle(text: str, user_id: int, user_name: str) -> str:
         result = execute_skill("query_budget", user_id, user_name, {})
         return _format_budget(result)
 
-    # Expense pattern
     m = _EXPENSE_RE.match(text)
     if m:
         note = m.group(1).strip()

@@ -8,14 +8,21 @@ load_dotenv()
 # Telegram
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-# MiniMax
-MINIMAX_API_KEY: str = os.getenv("MINIMAX_API_KEY", "")
-MINIMAX_GROUP_ID: str = os.getenv("MINIMAX_GROUP_ID", "")
-MINIMAX_MODEL: str = os.getenv("MINIMAX_MODEL", "abab6.5s-chat")
+# ─── LLM Provider ───
+# Supported: openai, minimax, deepseek, qwen, custom
+LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "minimax")
+LLM_API_KEY: str = os.getenv("LLM_API_KEY", "") or os.getenv("MINIMAX_API_KEY", "")
+LLM_MODEL: str = os.getenv("LLM_MODEL", "") or os.getenv("MINIMAX_MODEL", "abab6.5s-chat")
+LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "")
+# Vision model (for receipt OCR) — defaults to same as LLM_MODEL
+LLM_VISION_MODEL: str = os.getenv("LLM_VISION_MODEL", "")
 
-# MiniMax API cost control
-# Monthly token limit (0 = unlimited). abab6.5s ~ ¥0.001/1k tokens
-MINIMAX_MONTHLY_TOKEN_LIMIT: int = int(os.getenv("MINIMAX_MONTHLY_TOKEN_LIMIT", "500000"))
+# Backward compat
+MINIMAX_API_KEY: str = LLM_API_KEY
+MINIMAX_MODEL: str = LLM_MODEL
+
+# Monthly token limit (0 = unlimited)
+LLM_MONTHLY_TOKEN_LIMIT: int = int(os.getenv("LLM_MONTHLY_TOKEN_LIMIT", "0") or os.getenv("MINIMAX_MONTHLY_TOKEN_LIMIT", "500000"))
 
 # Database
 DATABASE_PATH: str = os.getenv("DATABASE_PATH", "data/expenses.db")
@@ -25,7 +32,6 @@ _allowed = os.getenv("ALLOWED_USER_IDS", "")
 ALLOWED_USER_IDS: list[int] = [int(uid.strip()) for uid in _allowed.split(",") if uid.strip()]
 
 # Family members: FAMILY_MEMBERS="user_id:显示名,user_id:显示名"
-# Example: FAMILY_MEMBERS="123456:老公,789012:老婆"
 _members_raw = os.getenv("FAMILY_MEMBERS", "")
 FAMILY_MEMBERS: dict[int, str] = {}
 for _m in _members_raw.split(","):
@@ -37,12 +43,12 @@ for _m in _members_raw.split(","):
 # Timezone
 TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Singapore")
 
-# Currency
+# Currency (default display currency)
 CURRENCY: str = os.getenv("CURRENCY", "SGD")
 
 # Expense categories
 CATEGORIES: list[str] = ["餐饮", "交通", "购物", "娱乐", "生活", "医疗", "其他"]
 
 # Weekly summary: day of week (0=Monday, 6=Sunday)
-WEEKLY_SUMMARY_DAY: int = int(os.getenv("WEEKLY_SUMMARY_DAY", "6"))  # Sunday
-WEEKLY_SUMMARY_HOUR: int = int(os.getenv("WEEKLY_SUMMARY_HOUR", "20"))  # 8 PM
+WEEKLY_SUMMARY_DAY: int = int(os.getenv("WEEKLY_SUMMARY_DAY", "6"))
+WEEKLY_SUMMARY_HOUR: int = int(os.getenv("WEEKLY_SUMMARY_HOUR", "20"))

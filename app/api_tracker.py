@@ -1,11 +1,11 @@
-"""MiniMax API usage tracking and cost control."""
+"""LLM API usage tracking and cost control."""
 
 import logging
 from datetime import datetime
 
 from zoneinfo import ZoneInfo
 
-from app.config import MINIMAX_MONTHLY_TOKEN_LIMIT, TIMEZONE
+from app.config import LLM_MONTHLY_TOKEN_LIMIT, TIMEZONE
 from app.database import get_connection
 
 logger = logging.getLogger(__name__)
@@ -52,16 +52,16 @@ def is_within_limit() -> bool:
 
     Returns True if usage is OK (under limit or no limit set).
     """
-    if MINIMAX_MONTHLY_TOKEN_LIMIT <= 0:
+    if LLM_MONTHLY_TOKEN_LIMIT <= 0:
         return True  # No limit
     used = get_monthly_token_usage()
-    return used < MINIMAX_MONTHLY_TOKEN_LIMIT
+    return used < LLM_MONTHLY_TOKEN_LIMIT
 
 
 def get_usage_stats() -> dict:
     """Get usage statistics for the current month."""
     used = get_monthly_token_usage()
-    limit = MINIMAX_MONTHLY_TOKEN_LIMIT
+    limit = LLM_MONTHLY_TOKEN_LIMIT
     return {
         "monthly_used": used,
         "monthly_limit": limit,

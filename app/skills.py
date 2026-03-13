@@ -1,7 +1,7 @@
 """Skill definitions: all DB operations as callable functions for the LLM agent.
 
 Each skill function accepts a dict of parameters and returns a dict result.
-The SKILL_DEFINITIONS list provides the function-calling schema for MiniMax.
+The TOOL_DEFINITIONS list provides the function-calling schema for the LLM.
 """
 
 import logging
@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from app.config import CATEGORIES, CURRENCY, FAMILY_MEMBERS, TIMEZONE
 from app.database import get_connection
 from app.models.expense import Expense
-from app.services.expense_service import delete_last_expense, save_expense
+from app.services.expense_service import delete_last_expense, export_expenses_csv, save_expense
 from app.services.stats_service import (
     get_category_total,
     get_member_name,
@@ -25,43 +25,86 @@ from app.services.stats_service import (
 
 logger = logging.getLogger(__name__)
 
+# Simple in-memory exchange rates (updated periodically or hardcoded)
+EXCHANGE_RATES: dict[str, float] = {
+    "SGD": 1.0,
+    "CNY": 0.19,   # 1 CNY ≈ 0.19 SGD
+    "RMB": 0.19,
+    "USD": 1.35,   # 1 USD ≈ 1.35 SGD
+    "AUD": 0.88,   # 1 AUD ≈ 0.88 SGD
+    "JPY": 0.009,  # 1 JPY ≈ 0.009 SGD
+    "MYR": 0.30,   # 1 MYR ≈ 0.30 SGD
+    "EUR": 1.45,   # 1 EUR ≈ 1.45 SGD
+    "GBP": 1.70,   # 1 GBP ≈ 1.70 SGD
+    "THB": 0.038,  # 1 THB ≈ 0.038 SGD
+    "KRW": 0.001,  # 1 KRW ≈ 0.001 SGD
+}
+
+
+def _convert_to_sgd(amount: float, currency: str) -> float:
+    """Convert amount to SGD using exchange rates."""
+    currency = currency.upper()
+    if currency == "SGD":
+        return amount
+    rate = EXCHANGE_RATES.get(currency)
+    if rate is None:
+        logger.warning("Unknown currency %s, treating as SGD", currency)
+        return amount
+    return round(amount * rate, 2)
+
 
 # ═══════════════════════════════════════════
 #  Skill implementations
 # ═══════════════════════════════════════════
 
 def skill_record_expense(user_id: int, user_name: str, params: dict) -> dict:
-    """Record one expense."""
+    """Record one expense with optional currency and event tag."""
     tz = ZoneInfo(TIMEZONE)
     now = datetime.now(tz)
     category = params.get("category", "其他")
     if category not in CATEGORIES:
         category = "其他"
     amount = float(params.get("amount", 0))
+    currency = params.get("currency", CURRENCY).upper()
     note = params.get("note", "")
+    event_tag = params.get("event_tag", "")
+
+    # If no event tag provided, check for active event
+    if not event_tag:
+        event_tag = _get_active_event(user_id)
+
+    amount_sgd = _convert_to_sgd(amount, currency)
 
     expense = Expense(
         user_id=user_id,
         user_name=user_name,
         category=category,
         amount=amount,
+        currency=currency,
+        amount_sgd=amount_sgd,
         note=note,
+        event_tag=event_tag,
         created_at=now.isoformat(),
     )
     row_id = save_expense(expense)
 
-    # Check budget after recording
     budget_alert = _check_budget_alert(user_id, category)
 
-    return {
+    result: dict[str, Any] = {
         "success": True,
         "id": row_id,
         "category": category,
         "amount": amount,
+        "currency": currency,
         "note": note,
-        "currency": CURRENCY,
         "budget_alert": budget_alert,
     }
+    if currency != CURRENCY:
+        result["amount_sgd"] = amount_sgd
+        result["default_currency"] = CURRENCY
+    if event_tag:
+        result["event_tag"] = event_tag
+    return result
 
 
 def skill_delete_last(user_id: int, user_name: str, params: dict) -> dict:
@@ -73,9 +116,9 @@ def skill_delete_last(user_id: int, user_name: str, params: dict) -> dict:
             "deleted": {
                 "category": deleted.category,
                 "amount": deleted.amount,
+                "currency": deleted.currency,
                 "note": deleted.note,
             },
-            "currency": CURRENCY,
         }
     return {"success": False, "message": "没有可以删除的记录"}
 
@@ -157,7 +200,6 @@ def skill_query_budget(user_id: int, user_name: str, params: dict) -> dict:
     for row in rows:
         cat = row["category"]
         limit_val = float(row["monthly_limit"])
-        # Get current spending
         if cat == "_total":
             spent = get_month_total([user_id])
             cat_label = "总计"
@@ -184,7 +226,6 @@ def skill_get_spending_analysis(user_id: int, user_name: str, params: dict) -> d
     grand_total = sum(item["total"] for item in summary)
     label = _scope_label(scope, user_id)
 
-    # Also get budget info
     with get_connection() as conn:
         budget_rows = conn.execute(
             "SELECT category, monthly_limit FROM budgets WHERE user_id = ?",
@@ -201,8 +242,103 @@ def skill_get_spending_analysis(user_id: int, user_name: str, params: dict) -> d
     }
 
 
+def skill_start_event(user_id: int, user_name: str, params: dict) -> dict:
+    """Start an event/trip tag. All subsequent expenses are tagged automatically."""
+    tag = params.get("tag", "").strip()
+    description = params.get("description", "").strip()
+    if not tag:
+        return {"success": False, "message": "请提供事件标签名"}
+
+    tz = ZoneInfo(TIMEZONE)
+    now = datetime.now(tz)
+    with get_connection() as conn:
+        # Deactivate all other events first
+        conn.execute("UPDATE events SET is_active = 0 WHERE user_id = ?", (user_id,))
+        conn.execute(
+            "INSERT INTO events (user_id, tag, description, is_active, created_at) "
+            "VALUES (?, ?, ?, 1, ?) "
+            "ON CONFLICT(user_id, tag) DO UPDATE SET is_active = 1, description = ?, created_at = ?",
+            (user_id, tag, description, now.isoformat(), description, now.isoformat()),
+        )
+        conn.commit()
+
+    return {"success": True, "message": f"已开启事件标签「{tag}」，后续记账将自动标记", "tag": tag}
+
+
+def skill_stop_event(user_id: int, user_name: str, params: dict) -> dict:
+    """Stop the active event tag."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT tag FROM events WHERE user_id = ? AND is_active = 1", (user_id,)
+        ).fetchone()
+        if not row:
+            return {"success": False, "message": "当前没有活跃的事件标签"}
+        tag = row["tag"]
+        conn.execute("UPDATE events SET is_active = 0 WHERE user_id = ?", (user_id,))
+        conn.commit()
+    return {"success": True, "message": f"已关闭事件标签「{tag}」", "tag": tag}
+
+
+def skill_query_event_summary(user_id: int, user_name: str, params: dict) -> dict:
+    """Get expense summary for a specific event/trip."""
+    tag = params.get("tag", "").strip()
+    if not tag:
+        return {"success": False, "message": "请提供事件标签名"}
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT user_name, category, SUM(amount_sgd) AS total "
+            "FROM expenses WHERE event_tag = ? "
+            "GROUP BY user_name, category ORDER BY user_name, total DESC",
+            (tag,),
+        ).fetchall()
+        total_row = conn.execute(
+            "SELECT SUM(amount_sgd) AS grand_total FROM expenses WHERE event_tag = ?",
+            (tag,),
+        ).fetchone()
+
+    if not rows:
+        return {"success": True, "message": f"事件「{tag}」暂无记录", "tag": tag}
+
+    per_person: dict[str, list] = {}
+    for r in rows:
+        name = r["user_name"]
+        per_person.setdefault(name, []).append({"category": r["category"], "total": float(r["total"])})
+
+    grand_total = float(total_row["grand_total"]) if total_row["grand_total"] else 0
+    per_person_total = {}
+    for name, items in per_person.items():
+        per_person_total[name] = sum(i["total"] for i in items)
+
+    return {
+        "success": True,
+        "tag": tag,
+        "per_person": per_person,
+        "per_person_total": per_person_total,
+        "grand_total": grand_total,
+        "split_each": round(grand_total / max(len(per_person_total), 1), 2),
+        "currency": CURRENCY,
+    }
+
+
+def skill_export_csv(user_id: int, user_name: str, params: dict) -> dict:
+    """Export expense data as CSV. Returns CSV content string."""
+    scope = params.get("scope", "me")
+    event_tag = params.get("event_tag", "")
+
+    target_uid = user_id if scope == "me" else None
+    csv_content = export_expenses_csv(user_id=target_uid, event_tag=event_tag)
+    line_count = csv_content.count("\n")
+
+    return {
+        "success": True,
+        "csv_content": csv_content,
+        "record_count": line_count,  # minus header
+    }
+
+
 # ═══════════════════════════════════════════
-#  Skill registry & MiniMax function schemas
+#  Skill registry & function schemas
 # ═══════════════════════════════════════════
 
 SKILL_MAP: dict[str, Any] = {
@@ -214,31 +350,26 @@ SKILL_MAP: dict[str, Any] = {
     "set_budget": skill_set_budget,
     "query_budget": skill_query_budget,
     "get_spending_analysis": skill_get_spending_analysis,
+    "start_event": skill_start_event,
+    "stop_event": skill_stop_event,
+    "query_event_summary": skill_query_event_summary,
+    "export_csv": skill_export_csv,
 }
 
-# MiniMax function calling tool definitions
 TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
             "name": "record_expense",
-            "description": "记录一笔支出。用户说了具体花费时调用。",
+            "description": "记录一笔支出。用户说了具体花费时调用。支持多币种和事件标签。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "category": {
-                        "type": "string",
-                        "description": "支出分类",
-                        "enum": CATEGORIES,
-                    },
-                    "amount": {
-                        "type": "number",
-                        "description": "金额",
-                    },
-                    "note": {
-                        "type": "string",
-                        "description": "备注说明",
-                    },
+                    "category": {"type": "string", "description": "支出分类", "enum": CATEGORIES},
+                    "amount": {"type": "number", "description": "金额"},
+                    "note": {"type": "string", "description": "备注说明"},
+                    "currency": {"type": "string", "description": f"货币代码，默认 {CURRENCY}。支持 SGD/CNY/USD/AUD/JPY/MYR/EUR/GBP/THB/KRW 等"},
+                    "event_tag": {"type": "string", "description": "事件/旅行标签（留空则自动使用活跃标签）"},
                 },
                 "required": ["category", "amount", "note"],
             },
@@ -248,11 +379,8 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "delete_last_expense",
-            "description": "删除用户最近一条支出记录。用户说'删掉上一条'、'撤销'时调用。",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
+            "description": "删除用户最近一条支出记录。",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -263,11 +391,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "scope": {
-                        "type": "string",
-                        "description": "查询范围：me=自己，spouse=配偶，family=家庭",
-                        "enum": ["me", "spouse", "family"],
-                    },
+                    "scope": {"type": "string", "description": "查询范围", "enum": ["me", "spouse", "family"]},
                 },
                 "required": ["scope"],
             },
@@ -281,16 +405,8 @@ TOOL_DEFINITIONS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "category": {
-                        "type": "string",
-                        "description": "支出分类",
-                        "enum": CATEGORIES,
-                    },
-                    "scope": {
-                        "type": "string",
-                        "description": "查询范围：me=自己，spouse=配偶，family=家庭",
-                        "enum": ["me", "spouse", "family"],
-                    },
+                    "category": {"type": "string", "description": "支出分类", "enum": CATEGORIES},
+                    "scope": {"type": "string", "description": "查询范围", "enum": ["me", "spouse", "family"]},
                 },
                 "required": ["category", "scope"],
             },
@@ -304,11 +420,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "scope": {
-                        "type": "string",
-                        "description": "查询范围：me=自己，spouse=配偶，family=家庭",
-                        "enum": ["me", "spouse", "family"],
-                    },
+                    "scope": {"type": "string", "description": "查询范围", "enum": ["me", "spouse", "family"]},
                 },
                 "required": ["scope"],
             },
@@ -318,18 +430,12 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "set_budget",
-            "description": "设置每月预算上限。category 为 '_total' 表示总预算，否则为分类预算。",
+            "description": "设置每月预算上限。category 为 '_total' 表示总预算。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "category": {
-                        "type": "string",
-                        "description": "预算分类，'_total' 表示总预算",
-                    },
-                    "amount": {
-                        "type": "number",
-                        "description": "每月预算金额",
-                    },
+                    "category": {"type": "string", "description": "预算分类，'_total' 表示总预算"},
+                    "amount": {"type": "number", "description": "每月预算金额"},
                 },
                 "required": ["category", "amount"],
             },
@@ -339,28 +445,72 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "query_budget",
-            "description": "查询预算使用情况。用户问'预算还剩多少'、'预算情况'时调用。",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
+            "description": "查询预算使用情况。",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
         "type": "function",
         "function": {
             "name": "get_spending_analysis",
-            "description": "获取消费数据用于分析。用户需要消费建议、财务规划、省钱建议时调用。",
+            "description": "获取消费数据用于分析和财务建议。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "scope": {
-                        "type": "string",
-                        "description": "分析范围：me=自己，spouse=配偶，family=家庭",
-                        "enum": ["me", "spouse", "family"],
-                    },
+                    "scope": {"type": "string", "description": "分析范围", "enum": ["me", "spouse", "family"]},
                 },
                 "required": ["scope"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_event",
+            "description": "开启一个事件/旅行标签。开启后所有记账自动附带此标签，方便事后汇总。用户说'开始日本旅行'、'开启XX事件'时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string", "description": "事件标签名，如'日本旅行'、'春节'"},
+                    "description": {"type": "string", "description": "事件描述"},
+                },
+                "required": ["tag"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_event",
+            "description": "关闭当前活跃的事件标签。用户说'结束旅行'、'关闭事件'时调用。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_event_summary",
+            "description": "查询某个事件/旅行的花费汇总和AA结算。用户说'日本旅行花了多少'、'XX事件汇总'时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string", "description": "事件标签名"},
+                },
+                "required": ["tag"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "export_csv",
+            "description": "导出账单为CSV。用户说'导出账单'、'导出数据'时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scope": {"type": "string", "description": "导出范围", "enum": ["me", "family"]},
+                    "event_tag": {"type": "string", "description": "只导出指定事件的数据（留空导出全部）"},
+                },
             },
         },
     },
@@ -372,10 +522,8 @@ TOOL_DEFINITIONS: list[dict] = [
 # ═══════════════════════════════════════════
 
 def _scope_label(scope: str, my_user_id: int) -> str:
-    """Return a human-readable label for the query scope."""
     if scope == "me":
-        name = FAMILY_MEMBERS.get(my_user_id, "我")
-        return name
+        return FAMILY_MEMBERS.get(my_user_id, "我")
     elif scope == "spouse":
         spouse_id = get_spouse_id(my_user_id)
         if spouse_id is not None:
@@ -385,10 +533,18 @@ def _scope_label(scope: str, my_user_id: int) -> str:
         return "家庭"
 
 
-def _check_budget_alert(user_id: int, category: str) -> Optional[str]:
-    """Check if spending has exceeded or is near budget. Returns alert message or None."""
+def _get_active_event(user_id: int) -> str:
+    """Get the currently active event tag for a user."""
     with get_connection() as conn:
-        # Check category budget
+        row = conn.execute(
+            "SELECT tag FROM events WHERE user_id = ? AND is_active = 1",
+            (user_id,),
+        ).fetchone()
+    return row["tag"] if row else ""
+
+
+def _check_budget_alert(user_id: int, category: str) -> Optional[str]:
+    with get_connection() as conn:
         row = conn.execute(
             "SELECT monthly_limit FROM budgets WHERE user_id = ? AND category = ?",
             (user_id, category),
@@ -402,7 +558,6 @@ def _check_budget_alert(user_id: int, category: str) -> Optional[str]:
             elif spent > limit_val * 0.8:
                 alerts.append(f"⚡ {category}已用预算 {spent/limit_val*100:.0f}%（{spent:.2f}/{limit_val:.2f} {CURRENCY}）")
 
-        # Check total budget
         row = conn.execute(
             "SELECT monthly_limit FROM budgets WHERE user_id = ? AND category = '_total'",
             (user_id,),
@@ -419,7 +574,6 @@ def _check_budget_alert(user_id: int, category: str) -> Optional[str]:
 
 
 def execute_skill(skill_name: str, user_id: int, user_name: str, params: dict) -> dict:
-    """Execute a skill by name with given parameters."""
     func = SKILL_MAP.get(skill_name)
     if func is None:
         return {"success": False, "message": f"未知的操作: {skill_name}"}

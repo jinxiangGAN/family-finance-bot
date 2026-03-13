@@ -11,7 +11,7 @@ from app.config import DATABASE_PATH
 logger = logging.getLogger(__name__)
 
 CREATE_TABLES_SQL = [
-    # Expenses table
+    # Expenses table (with currency and event tag)
     """
     CREATE TABLE IF NOT EXISTS expenses (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -19,7 +19,10 @@ CREATE_TABLES_SQL = [
         user_name   TEXT    NOT NULL DEFAULT '',
         category    TEXT    NOT NULL,
         amount      REAL    NOT NULL,
+        currency    TEXT    NOT NULL DEFAULT 'SGD',
+        amount_sgd  REAL    NOT NULL DEFAULT 0,
         note        TEXT    NOT NULL DEFAULT '',
+        event_tag   TEXT    NOT NULL DEFAULT '',
         created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     """,
@@ -46,14 +49,35 @@ CREATE_TABLES_SQL = [
         created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     """,
+    # Event tags table
+    """
+    CREATE TABLE IF NOT EXISTS events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL,
+        tag         TEXT    NOT NULL,
+        description TEXT    NOT NULL DEFAULT '',
+        is_active   INTEGER NOT NULL DEFAULT 1,
+        created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, tag)
+    );
+    """,
 ]
 
 CREATE_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_expenses_user_id    ON expenses(user_id);",
     "CREATE INDEX IF NOT EXISTS idx_expenses_category   ON expenses(category);",
     "CREATE INDEX IF NOT EXISTS idx_expenses_created_at ON expenses(created_at);",
+    "CREATE INDEX IF NOT EXISTS idx_expenses_event_tag  ON expenses(event_tag);",
     "CREATE INDEX IF NOT EXISTS idx_budgets_user_id     ON budgets(user_id);",
     "CREATE INDEX IF NOT EXISTS idx_api_usage_created   ON api_usage(created_at);",
+    "CREATE INDEX IF NOT EXISTS idx_events_user_id      ON events(user_id);",
+]
+
+# Migration: add new columns to existing databases
+MIGRATIONS = [
+    "ALTER TABLE expenses ADD COLUMN currency TEXT NOT NULL DEFAULT 'SGD';",
+    "ALTER TABLE expenses ADD COLUMN amount_sgd REAL NOT NULL DEFAULT 0;",
+    "ALTER TABLE expenses ADD COLUMN event_tag TEXT NOT NULL DEFAULT '';",
 ]
 
 
@@ -68,6 +92,12 @@ def init_db() -> None:
             conn.execute(table_sql)
         for idx_sql in CREATE_INDEX_SQL:
             conn.execute(idx_sql)
+        # Run migrations (ignore errors for already-applied)
+        for migration in MIGRATIONS:
+            try:
+                conn.execute(migration)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         conn.commit()
     logger.info("Database initialized at %s", DATABASE_PATH)
 

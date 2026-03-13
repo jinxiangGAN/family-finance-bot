@@ -14,6 +14,9 @@ class Expense:
     category: str
     amount: float
     note: str
+    currency: str = "SGD"
+    amount_sgd: float = 0.0
+    event_tag: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     id: Optional[int] = None
 
@@ -24,7 +27,10 @@ class Expense:
             "user_name": self.user_name,
             "category": self.category,
             "amount": self.amount,
+            "currency": self.currency,
+            "amount_sgd": self.amount_sgd,
             "note": self.note,
+            "event_tag": self.event_tag,
             "created_at": self.created_at,
         }
 
