@@ -112,12 +112,18 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
 
     mm = _get_memory_manager()
     builder = _get_prompt_builder()
+    chat_id = session.chat_id
+
+    # ── Session-timeout: clear stale working memory on new session ──
+    if session.interaction_count == 0:
+        mm.clear_working_memory(user_id, chat_id)
+        logger.info("[SESSION] New/expired session for user=%d chat=%d — working memory cleared", user_id, chat_id)
 
     # ── LOG: Input ──
     logger.info("[INPUT] user=%d name=%s chat=%s msg=%s", user_id, user_name, "private" if session.is_private else "group", text)
 
-    # Step 1: Assemble memory context (all 3 tiers)
-    memory_context = await mm.assemble_memory_context(user_id, text)
+    # Step 1: Assemble memory context (all 3 tiers; Tier 3 gated by intent)
+    memory_context = await mm.assemble_memory_context(user_id, text, chat_id=chat_id)
     if memory_context:
         logger.info("[MEMORY] Recalled %d chars of context for user %d", len(memory_context), user_id)
 
@@ -131,11 +137,11 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
     # Step 3: Build messages (include working memory as conversation history)
     messages = [{"role": "system", "content": system_prompt}]
 
-    # Inject working memory turns for multi-turn coherence
-    wm = mm.get_working_memory(user_id)
+    # Inject working memory turns for multi-turn coherence (isolated per chat)
+    wm = mm.get_working_memory(user_id, chat_id)
     wm_msgs = wm.get_messages()
     if wm_msgs:
-        logger.info("[WORKING_MEM] Injecting %d past turns", len(wm_msgs))
+        logger.info("[WORKING_MEM] Injecting %d past turns (chat=%d)", len(wm_msgs), chat_id)
     for past_msg in wm_msgs:
         messages.append(past_msg)
 
@@ -160,49 +166,59 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
     if not tool_calls:
         reply = resp_msg.get("content", "🤔 我没有理解你的意思，请输入 /help 查看帮助。")
         logger.info("[LLM_REPLY] No tool calls, direct reply (%d chars)", len(reply))
-        # Update working memory
-        mm.add_working_turn(user_id, "user", text)
-        mm.add_working_turn(user_id, "assistant", reply)
+        # Update working memory (isolated per chat)
+        mm.add_working_turn(user_id, chat_id, "user", text)
+        mm.add_working_turn(user_id, chat_id, "assistant", reply)
         return reply
 
-    # Step 5: Execute tool calls (via MCP registry)
-    messages.append(resp_msg)
+    # Step 5–6: ReAct loop — execute tool calls then let LLM synthesise reply.
+    # Supports chained tool calls: if the LLM's follow-up response also
+    # contains tool_calls (e.g. "记账后顺便查预算"), keep iterating.
+    MAX_TOOL_ROUNDS = 3
+    for _round in range(MAX_TOOL_ROUNDS):
+        messages.append(resp_msg)
 
-    for tc in tool_calls:
-        func = tc.get("function", {})
-        tool_name = func.get("name", "")
-        try:
-            params = json.loads(func.get("arguments", "{}"))
-        except json.JSONDecodeError:
-            params = {}
+        for tc in tool_calls:
+            func = tc.get("function", {})
+            tool_name = func.get("name", "")
+            try:
+                params = json.loads(func.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                params = {}
 
-        logger.info("[LLM_INTENT] Calling tool: %s with args: %s", tool_name, json.dumps(params, ensure_ascii=False)[:300])
-        result = execute_tool(tool_name, user_id, user_name, params)
-        logger.info("[TOOL_RESULT] %s → success=%s %s", tool_name, result.get("success"), json.dumps(result, ensure_ascii=False)[:200])
+            logger.info("[LLM_INTENT] Round %d — Calling tool: %s with args: %s", _round + 1, tool_name, json.dumps(params, ensure_ascii=False)[:300])
+            result = execute_tool(tool_name, user_id, user_name, params)
+            logger.info("[TOOL_RESULT] %s → success=%s %s", tool_name, result.get("success"), json.dumps(result, ensure_ascii=False)[:200])
 
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tc.get("id", ""),
-            "content": json.dumps(result, ensure_ascii=False),
-        })
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "content": json.dumps(result, ensure_ascii=False),
+            })
 
-    # Step 6: Final LLM call for human-readable reply
-    final_msg, usage2 = await provider.chat_completion(messages, tools=tools)
-    if usage2:
-        record_usage(
-            user_id,
-            usage2.get("prompt_tokens", 0),
-            usage2.get("completion_tokens", 0),
-            usage2.get("total_tokens", 0),
-            LLM_MODEL,
-        )
+        # Let LLM synthesise a reply (or decide to call more tools)
+        resp_msg, usage2 = await provider.chat_completion(messages, tools=tools)
+        if usage2:
+            record_usage(
+                user_id,
+                usage2.get("prompt_tokens", 0),
+                usage2.get("completion_tokens", 0),
+                usage2.get("total_tokens", 0),
+                LLM_MODEL,
+            )
 
-    reply = final_msg.get("content", "操作完成。")
+        tool_calls = resp_msg.get("tool_calls")
+        if not tool_calls:
+            break  # LLM produced a final text reply — exit loop
+    else:
+        logger.warning("[AGENT] Hit max tool rounds (%d) for user=%d", MAX_TOOL_ROUNDS, user_id)
+
+    reply = resp_msg.get("content", "操作完成。")
     logger.info("[OUTPUT] user=%d reply=%s", user_id, reply[:200])
 
-    # Step 7: Update working memory buffer
-    mm.add_working_turn(user_id, "user", text)
-    mm.add_working_turn(user_id, "assistant", reply)
+    # Step 7: Update working memory buffer (isolated per chat)
+    mm.add_working_turn(user_id, chat_id, "user", text)
+    mm.add_working_turn(user_id, chat_id, "assistant", reply)
 
     return reply
 

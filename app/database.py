@@ -190,9 +190,15 @@ def _migrate_legacy_memories(conn: sqlite3.Connection) -> None:
 
 @contextmanager
 def get_connection() -> Generator[sqlite3.Connection, None, None]:
-    """Yield a SQLite connection with row_factory set to sqlite3.Row."""
-    conn = sqlite3.connect(DATABASE_PATH)
+    """Yield a SQLite connection with row_factory set to sqlite3.Row.
+
+    Uses WAL journal mode for safe concurrent reads/writes (avoids
+    'database is locked' when two family members record expenses
+    at the same time via Telegram's multi-threaded handler).
+    """
+    conn = sqlite3.connect(DATABASE_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
     try:
         yield conn
     finally:

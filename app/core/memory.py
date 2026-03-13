@@ -12,6 +12,7 @@ Recall strategy:
 """
 
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -104,17 +105,17 @@ class MemoryManager:
     """Orchestrates the 3-tier memory system.
 
     Usage:
-        mm = MemoryManager(provider)      # provider = LLMProvider (for embeddings)
-        profile = mm.load_profile(uid)     # Tier 1: core_profile
-        wm = mm.get_working_memory(uid)    # Tier 2: working_memory
-        episodes = await mm.recall(uid, q) # Tier 3: episodic vector recall
+        mm = MemoryManager(provider)              # provider = LLMProvider (for embeddings)
+        profile = mm.load_profile(uid)             # Tier 1: core_profile
+        wm = mm.get_working_memory(uid, chat_id)  # Tier 2: working_memory
+        episodes = await mm.recall(uid, q)         # Tier 3: episodic vector recall
     """
 
     def __init__(self, provider: Optional[LLMProvider] = None, embedding_model: str = ""):
         self._provider = provider
         self._embedding_model = embedding_model
-        # Per-user working memory (keyed by user_id)
-        self._working: dict[int, WorkingMemory] = defaultdict(WorkingMemory)
+        # Per-(user, chat) working memory — isolates private vs group context
+        self._working: dict[tuple[int, int], WorkingMemory] = defaultdict(WorkingMemory)
 
     # ─── Tier 1: Core Profile ───
 
@@ -163,16 +164,21 @@ class MemoryManager:
 
     # ─── Tier 2: Working Memory ───
 
-    def get_working_memory(self, user_id: int) -> WorkingMemory:
-        """Get (or create) in-memory working buffer for a user."""
-        return self._working[user_id]
+    def get_working_memory(self, user_id: int, chat_id: int = 0) -> WorkingMemory:
+        """Get (or create) in-memory working buffer for a (user, chat) pair.
 
-    def add_working_turn(self, user_id: int, role: str, content: str) -> None:
-        self._working[user_id].add_turn(role, content)
+        Using (user_id, chat_id) as key ensures private chat context
+        never leaks into group chat and vice versa.
+        """
+        return self._working[(user_id, chat_id)]
 
-    def clear_working_memory(self, user_id: int) -> None:
-        if user_id in self._working:
-            self._working[user_id].clear()
+    def add_working_turn(self, user_id: int, chat_id: int, role: str, content: str) -> None:
+        self._working[(user_id, chat_id)].add_turn(role, content)
+
+    def clear_working_memory(self, user_id: int, chat_id: int = 0) -> None:
+        key = (user_id, chat_id)
+        if key in self._working:
+            self._working[key].clear()
 
     # ─── Tier 3: Episodic Memory ───
 
@@ -397,33 +403,51 @@ class MemoryManager:
             for r in rows
         ]
 
+    # ─── Tier 3 intent gate ───
+    # Only trigger expensive Embedding / FTS recall when the query
+    # looks like a lookup, analysis, or reflection.  Pure expense
+    # recording ("吃饭 20") and trivial filler ("哈哈") skip Tier 3,
+    # keeping latency low and API costs down.
+    _RECALL_TRIGGERS = re.compile(
+        r"(上次|之前|以前|过去|历史|总共|花了多少|汇总|分析|趋势|对比|统计"
+        r"|记得|回忆|目标|计划|省钱|节约|建议|规划|怎么样|如何"
+        r"|预算|超支|习惯|偏好|消费模式|最近|这段时间"
+        r"|你还记得|帮我想想|忘掉|忘记)"
+    )
+
     # ─── Assembly: combine all tiers for prompt ───
 
-    async def assemble_memory_context(self, user_id: int, query: str) -> str:
+    async def assemble_memory_context(self, user_id: int, query: str, chat_id: int = 0) -> str:
         """Assemble a combined memory prompt from all three tiers."""
         parts: list[str] = []
 
-        # Tier 1: Core Profile
+        # Tier 1: Core Profile — always injected (cheap, local DB read)
         profile = self.load_profile(user_id)
         profile_text = profile.to_prompt()
         if profile_text:
             parts.append(profile_text)
 
-        # Tier 2: Working Memory (conversation context)
-        wm = self.get_working_memory(user_id)
+        # Tier 2: Working Memory — always injected (in-memory, zero cost)
+        wm = self.get_working_memory(user_id, chat_id)
         wm_text = wm.to_prompt()
         if wm_text:
             parts.append(wm_text)
 
-        # Tier 3: Episodic recall
-        episodes = await self.recall_episodes(user_id, query)
-        if episodes:
-            lines = ["[Relevant Episodic Memories]"]
-            for ep in episodes:
-                prefix = "🔴" if ep.importance >= 8 else "🟡" if ep.importance >= 5 else "🟢"
-                sim_tag = f" (similarity:{ep.similarity:.0%})" if ep.similarity > 0 else ""
-                lines.append(f"{prefix} [{ep.category}] {ep.content}{sim_tag}")
-            parts.append("\n".join(lines))
+        # Tier 3: Episodic recall — only when the query signals a lookup intent.
+        # This avoids calling the Embedding API + vector search for trivial
+        # messages like "哈哈", "好的", or simple expense recordings.
+        if self._RECALL_TRIGGERS.search(query):
+            episodes = await self.recall_episodes(user_id, query)
+            if episodes:
+                lines = ["[Relevant Episodic Memories]"]
+                for ep in episodes:
+                    prefix = "🔴" if ep.importance >= 8 else "🟡" if ep.importance >= 5 else "🟢"
+                    sim_tag = f" (similarity:{ep.similarity:.0%})" if ep.similarity > 0 else ""
+                    lines.append(f"{prefix} [{ep.category}] {ep.content}{sim_tag}")
+                parts.append("\n".join(lines))
+            logger.debug("Tier 3 recall triggered for: %s", query[:60])
+        else:
+            logger.debug("Tier 3 recall skipped (no recall intent): %s", query[:60])
 
         return "\n\n".join(parts) if parts else ""
 
