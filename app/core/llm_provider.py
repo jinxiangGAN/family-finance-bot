@@ -107,6 +107,13 @@ class LLMProvider:
                 resp = await client.post(url, headers=headers, json=payload)
 
             if resp.status_code not in self._RETRYABLE_STATUSES:
+                if resp.status_code >= 400:
+                    # Log error body for debugging (400, 401, 403, 404, etc.)
+                    logger.error(
+                        "[LLM] HTTP %d from model=%s — %s",
+                        resp.status_code, payload.get("model", "?"),
+                        resp.text[:500],
+                    )
                 resp.raise_for_status()
                 return resp
 
@@ -143,7 +150,6 @@ class LLMProvider:
         messages: list[dict],
         tools: Optional[list[dict]] = None,
         temperature: float = 0.3,
-        max_tokens: int = 1024,
     ) -> tuple[dict, Optional[dict]]:
         """Call chat completion API. Returns (message, usage)."""
         url = f"{self.base_url}/chat/completions"
@@ -155,7 +161,6 @@ class LLMProvider:
             "model": self._next_model(),
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
         }
         if tools:
             payload["tools"] = tools
@@ -177,7 +182,6 @@ class LLMProvider:
         image_url: str,
         system_prompt: str = "",
         temperature: float = 0.3,
-        max_tokens: int = 1024,
     ) -> tuple[str, Optional[dict]]:
         """Call vision-capable chat completion with an image."""
         url = f"{self.base_url}/chat/completions"
@@ -202,7 +206,6 @@ class LLMProvider:
             "model": self._next_model(),
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
         }
 
         resp = await self._post_with_retry(url, headers, payload)
@@ -296,7 +299,6 @@ class MiniMaxProvider(LLMProvider):
         messages: list[dict],
         tools: Optional[list[dict]] = None,
         temperature: float = 0.3,
-        max_tokens: int = 1024,
     ) -> tuple[dict, Optional[dict]]:
         url = f"{self.base_url}/chatcompletion_v2"
         headers = {
@@ -307,7 +309,6 @@ class MiniMaxProvider(LLMProvider):
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
         }
         if tools:
             payload["tools"] = tools
@@ -327,7 +328,6 @@ class MiniMaxProvider(LLMProvider):
         image_url: str,
         system_prompt: str = "",
         temperature: float = 0.3,
-        max_tokens: int = 1024,
     ) -> tuple[str, Optional[dict]]:
         """MiniMax vision via the same endpoint."""
         url = f"{self.base_url}/chatcompletion_v2"
@@ -349,7 +349,6 @@ class MiniMaxProvider(LLMProvider):
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
         }
         resp = await self._post_with_retry(url, headers, payload)
         data = resp.json()
