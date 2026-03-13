@@ -1,6 +1,6 @@
 """MCP Tool: Expense management — record, delete, export."""
 
-from app.skills import skill_delete_last, skill_export_csv, skill_record_expense
+from app.services.skills import skill_delete_last, skill_export_csv, skill_record_expense
 from app.config import CATEGORIES, CURRENCY
 
 TOOLS = [

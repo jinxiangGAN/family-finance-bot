@@ -14,8 +14,8 @@ from telegram.ext import (
 )
 from zoneinfo import ZoneInfo
 
-from app.agent import agent_handle, agent_handle_export, agent_handle_image
-from app.api_tracker import get_usage_stats
+from app.core.agent import agent_handle, agent_handle_export, agent_handle_image
+from app.services.api_tracker import get_usage_stats
 from app.config import (
     ALLOWED_USER_IDS,
     CATEGORIES,
@@ -26,9 +26,9 @@ from app.config import (
     WEEKLY_SUMMARY_DAY,
     WEEKLY_SUMMARY_HOUR,
 )
-from app.scheduler import budget_alert_job, proactive_nudge_job, weekly_summary_job
+from app.bot.scheduler import budget_alert_job, proactive_nudge_job, weekly_summary_job
 from app.services.expense_service import delete_last_expense
-from app.session import get_or_create_session
+from app.core.session import get_or_create_session
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +191,7 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     user_id = update.effective_user.id  # type: ignore[union-attr]
 
-    from app.memory import get_recent_memories
+    from app.core.memory import get_recent_memories
     memories = get_recent_memories(user_id, limit=15)
 
     if not memories:

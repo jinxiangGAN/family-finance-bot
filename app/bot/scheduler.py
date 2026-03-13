@@ -15,7 +15,7 @@ from telegram.ext import ContextTypes
 from zoneinfo import ZoneInfo
 
 from app.config import ALLOWED_USER_IDS, CURRENCY, FAMILY_MEMBERS, TIMEZONE
-from app.memory import get_recent_memories, store_memory
+from app.core.memory import get_recent_memories, store_memory
 from app.services.stats_service import (
     get_category_total,
     get_month_summary,

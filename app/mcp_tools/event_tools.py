@@ -1,6 +1,6 @@
 """MCP Tool: Event/trip tag management."""
 
-from app.skills import skill_query_event_summary, skill_start_event, skill_stop_event
+from app.services.skills import skill_query_event_summary, skill_start_event, skill_stop_event
 
 TOOLS = [
     {

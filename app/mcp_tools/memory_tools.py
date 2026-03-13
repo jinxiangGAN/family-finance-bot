@@ -8,7 +8,7 @@ Tools:
   - get_user_profile   → read user's core profile
 """
 
-from app.memory import delete_memory, get_memory_manager, recall_memories, store_memory
+from app.core.memory import delete_memory, get_memory_manager, recall_memories, store_memory
 
 
 # ═══════════════════════════════════════════

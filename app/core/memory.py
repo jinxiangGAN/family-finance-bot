@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 from app.config import MEMORY_MAX_WORKING, MEMORY_RECALL_TOP_K, TIMEZONE
 from app.database import get_connection
-from app.llm_provider import (
+from app.core.llm_provider import (
     LLMProvider,
     cosine_similarity,
     pack_embedding,

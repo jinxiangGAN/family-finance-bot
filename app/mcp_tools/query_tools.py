@@ -1,7 +1,7 @@
 """MCP Tool: Query & analytics — monthly totals, summaries, analysis."""
 
 from app.config import CATEGORIES
-from app.skills import (
+from app.services.skills import (
     skill_get_spending_analysis,
     skill_query_budget,
     skill_query_category_total,

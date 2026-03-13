@@ -5,7 +5,7 @@ import sys
 
 from app.config import LLM_API_KEY, LLM_EMBEDDING_MODEL, LLM_PROVIDER, TELEGRAM_BOT_TOKEN
 from app.database import init_db
-from app.telegram_bot import build_application
+from app.bot.handlers import build_application
 
 import os as _os
 

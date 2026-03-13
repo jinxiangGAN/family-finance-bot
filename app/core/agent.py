@@ -14,7 +14,7 @@ import logging
 import re
 from typing import Optional
 
-from app.api_tracker import is_within_limit, record_usage
+from app.services.api_tracker import is_within_limit, record_usage
 from app.config import (
     CURRENCY,
     LLM_API_KEY,
@@ -25,11 +25,11 @@ from app.config import (
     LLM_VISION_MODEL,
     MEMORY_RECALL_TOP_K,
 )
-from app.llm_provider import PROVIDER_PRESETS, create_provider
+from app.core.llm_provider import PROVIDER_PRESETS, create_provider
 from app.mcp_tools.registry import execute_tool, get_all_tools
-from app.memory import MemoryManager, set_memory_manager
-from app.prompt_builder import VISION_PROMPT, PromptBuilder
-from app.session import Session
+from app.core.memory import MemoryManager, set_memory_manager
+from app.core.prompt_builder import VISION_PROMPT, PromptBuilder
+from app.core.session import Session
 
 logger = logging.getLogger(__name__)
 

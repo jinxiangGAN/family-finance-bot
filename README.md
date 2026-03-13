@@ -99,28 +99,30 @@ SQLite Database
 family-finance-claw/
 ├── app/
 │   ├── main.py              # Entry point
-│   ├── telegram_bot.py      # Bot handlers, commands, scheduled jobs
-│   ├── agent.py             # LLM agent v4: 3-tier memory + prompt factory
-│   ├── prompt_builder.py    # Dynamic modular prompt assembly (NEW)
-│   ├── llm_provider.py      # Abstract LLM + embedding interface
-│   ├── memory.py            # 3-tier MemoryManager (NEW architecture)
-│   ├── session.py           # Session management + working memory
-│   ├── skills.py            # Core skill implementations
-│   ├── api_tracker.py       # Token usage tracking and cost control
-│   ├── scheduler.py         # Scheduled jobs: weekly report, nudge, alerts
 │   ├── config.py            # Configuration from environment
 │   ├── database.py          # SQLite init, 3-tier memory tables, FTS5
-│   ├── mcp_tools/           # MCP-style pluggable tool registry
-│   │   ├── registry.py      # Auto-discover + dispatch
-│   │   ├── expense_tools.py # Record, delete, export (3 tools)
-│   │   ├── query_tools.py   # Query, budget, analysis (6 tools)
-│   │   ├── event_tools.py   # Event/trip management (3 tools)
-│   │   └── memory_tools.py  # Memory + profile (5 tools, was 3)
-│   ├── models/
-│   │   └── expense.py       # Data models
-│   └── services/
-│       ├── expense_service.py   # Expense CRUD + CSV export
-│       └── stats_service.py     # Statistics and query logic
+│   ├── core/                # 🧠 AI engine
+│   │   ├── agent.py         # LLM agent: 3-tier memory + prompt factory
+│   │   ├── llm_provider.py  # Abstract LLM + embedding interface
+│   │   ├── memory.py        # 3-tier MemoryManager
+│   │   ├── prompt_builder.py# Dynamic modular prompt assembly
+│   │   └── session.py       # Session tracking + persona switching
+│   ├── bot/                 # 🤖 Telegram interface
+│   │   ├── handlers.py      # Bot commands & message routing
+│   │   └── scheduler.py     # Scheduled jobs: weekly, nudge, alerts
+│   ├── services/            # 💼 Business logic
+│   │   ├── skills.py        # Skill implementations (tool handlers)
+│   │   ├── api_tracker.py   # Token usage tracking & cost control
+│   │   ├── expense_service.py # Expense CRUD + CSV export
+│   │   └── stats_service.py # Statistics and query logic
+│   ├── mcp_tools/           # 🔌 MCP pluggable tool registry
+│   │   ├── registry.py      # Auto-discover + dispatch (17 tools)
+│   │   ├── expense_tools.py # Record, delete, export (3)
+│   │   ├── query_tools.py   # Query, budget, analysis (6)
+│   │   ├── event_tools.py   # Event/trip management (3)
+│   │   └── memory_tools.py  # Memory + profile (5)
+│   └── models/
+│       └── expense.py       # Data models
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
