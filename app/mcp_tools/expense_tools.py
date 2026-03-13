@@ -8,15 +8,18 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "record_expense",
-            "description": "记录一笔支出。用户说了具体花费时调用。支持多币种和事件标签。",
+            "description": (
+                "Record a single expense. Call this when the user mentions a specific spending amount and category. "
+                "Supports multi-currency (auto-converts to default) and event/trip tags."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "category": {"type": "string", "description": "支出分类", "enum": CATEGORIES},
-                    "amount": {"type": "number", "description": "金额"},
-                    "note": {"type": "string", "description": "备注说明"},
-                    "currency": {"type": "string", "description": f"货币代码，默认 {CURRENCY}"},
-                    "event_tag": {"type": "string", "description": "事件/旅行标签（留空则自动使用活跃标签）"},
+                    "category": {"type": "string", "description": "Expense category", "enum": CATEGORIES},
+                    "amount": {"type": "number", "description": "Amount spent (numeric)"},
+                    "note": {"type": "string", "description": "Brief description of the expense"},
+                    "currency": {"type": "string", "description": f"ISO currency code, default: {CURRENCY}"},
+                    "event_tag": {"type": "string", "description": "Event/trip tag (leave empty to auto-use the active event tag)"},
                 },
                 "required": ["category", "amount", "note"],
             },
@@ -26,7 +29,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "delete_last_expense",
-            "description": "删除用户最近一条支出记录。",
+            "description": "Delete the user's most recently recorded expense. Use when the user says 'undo', 'delete last', or indicates a mistake.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -34,12 +37,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "export_csv",
-            "description": "导出账单为CSV。用户说'导出账单'、'导出数据'时调用。",
+            "description": "Export expense records to a CSV file. Call when the user says 'export', 'download data', etc.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "scope": {"type": "string", "description": "导出范围", "enum": ["me", "family"]},
-                    "event_tag": {"type": "string", "description": "只导出指定事件的数据"},
+                    "scope": {"type": "string", "description": "Export scope", "enum": ["me", "family"]},
+                    "event_tag": {"type": "string", "description": "Only export expenses under this event tag"},
                 },
             },
         },

@@ -48,7 +48,7 @@ class CoreProfile:
         """Render core profile as a prompt fragment."""
         if not self.data:
             return ""
-        lines = ["[用户画像]"]
+        lines = ["[Core Profile]"]
         for k, v in self.data.items():
             lines.append(f"- {k}: {v}")
         return "\n".join(lines)
@@ -77,9 +77,9 @@ class WorkingMemory:
         """Summarize working memory for context injection."""
         if not self.messages:
             return ""
-        lines = ["[近期对话上下文]"]
+        lines = ["[Working Context — Recent Conversation]"]
         for msg in self.messages[-6:]:  # Last 3 turns
-            role_label = "用户" if msg["role"] == "user" else "助手"
+            role_label = "User" if msg["role"] == "user" else "Assistant"
             lines.append(f"{role_label}: {msg['content'][:100]}{'...' if len(msg['content']) > 100 else ''}")
         return "\n".join(lines)
 
@@ -418,10 +418,10 @@ class MemoryManager:
         # Tier 3: Episodic recall
         episodes = await self.recall_episodes(user_id, query)
         if episodes:
-            lines = ["[相关记忆]"]
+            lines = ["[Relevant Episodic Memories]"]
             for ep in episodes:
                 prefix = "🔴" if ep.importance >= 8 else "🟡" if ep.importance >= 5 else "🟢"
-                sim_tag = f" (相似度:{ep.similarity:.0%})" if ep.similarity > 0 else ""
+                sim_tag = f" (similarity:{ep.similarity:.0%})" if ep.similarity > 0 else ""
                 lines.append(f"{prefix} [{ep.category}] {ep.content}{sim_tag}")
             parts.append("\n".join(lines))
 

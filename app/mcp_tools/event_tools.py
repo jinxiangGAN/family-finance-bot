@@ -7,12 +7,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "start_event",
-            "description": "开启一个事件/旅行标签。开启后所有记账自动附带此标签。用户说'开始日本旅行'、'开启XX事件'时调用。",
+            "description": "Start an event/trip tag. Once active, all subsequent expenses are automatically tagged with this event. Call when user says 'start Japan trip', 'begin event XX', etc.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "tag": {"type": "string", "description": "事件标签名，如'日本旅行'、'春节'"},
-                    "description": {"type": "string", "description": "事件描述"},
+                    "tag": {"type": "string", "description": "Event tag name, e.g., 'Japan Trip', 'Chinese New Year'"},
+                    "description": {"type": "string", "description": "Optional event description"},
                 },
                 "required": ["tag"],
             },
@@ -22,7 +22,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "stop_event",
-            "description": "关闭当前活跃的事件标签。用户说'结束旅行'、'关闭事件'时调用。",
+            "description": "Stop the currently active event/trip tag. Call when user says 'end trip', 'close event', etc.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -30,11 +30,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "query_event_summary",
-            "description": "查询某个事件/旅行的花费汇总和AA结算。",
+            "description": "Query the total spending summary and AA split for a specific event/trip.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "tag": {"type": "string", "description": "事件标签名"},
+                    "tag": {"type": "string", "description": "Event tag name to query"},
                 },
                 "required": ["tag"],
             },
