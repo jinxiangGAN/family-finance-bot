@@ -61,7 +61,24 @@ CREATE_TABLES_SQL = [
         UNIQUE(user_id, tag)
     );
     """,
+    # Semantic memory table
+    """
+    CREATE TABLE IF NOT EXISTS memories (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL,
+        content     TEXT    NOT NULL,
+        category    TEXT    NOT NULL DEFAULT 'general',
+        importance  INTEGER NOT NULL DEFAULT 5,
+        created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
 ]
+
+# FTS5 virtual table (created separately as it needs special handling)
+CREATE_FTS_SQL = """
+    CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
+    USING fts5(content, content_rowid='rowid');
+"""
 
 CREATE_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_expenses_user_id    ON expenses(user_id);",
@@ -71,6 +88,9 @@ CREATE_INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_budgets_user_id     ON budgets(user_id);",
     "CREATE INDEX IF NOT EXISTS idx_api_usage_created   ON api_usage(created_at);",
     "CREATE INDEX IF NOT EXISTS idx_events_user_id      ON events(user_id);",
+    "CREATE INDEX IF NOT EXISTS idx_memories_user_id    ON memories(user_id);",
+    "CREATE INDEX IF NOT EXISTS idx_memories_category   ON memories(category);",
+    "CREATE INDEX IF NOT EXISTS idx_memories_importance  ON memories(importance);",
 ]
 
 # Migration: add new columns to existing databases
@@ -90,6 +110,11 @@ def init_db() -> None:
     with get_connection() as conn:
         for table_sql in CREATE_TABLES_SQL:
             conn.execute(table_sql)
+        # FTS5 virtual table (separate handling)
+        try:
+            conn.execute(CREATE_FTS_SQL)
+        except sqlite3.OperationalError:
+            pass  # May already exist
         for idx_sql in CREATE_INDEX_SQL:
             conn.execute(idx_sql)
         # Run migrations (ignore errors for already-applied)

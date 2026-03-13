@@ -1,11 +1,11 @@
-"""LLM Agent: uses function calling to dispatch skills.
+"""LLM Agent v3: Memory-augmented, session-aware, MCP-powered.
 
 Flow:
-1. User message (text or image) → LLM (with tool definitions)
-2. LLM returns tool_calls → execute skills → get results
-3. Feed results back to LLM → LLM generates final human-readable reply
-
-Supports any OpenAI-compatible provider via llm_provider.py.
+1. User message → build session context
+2. Recall relevant memories → inject into system prompt
+3. LLM call with MCP tools → execute tool calls
+4. Post-interaction reflection → store new memories if needed
+5. Return final reply (tone adapted to private/group chat)
 """
 
 import json
@@ -16,49 +16,50 @@ from typing import Optional
 from app.api_tracker import is_within_limit, record_usage
 from app.config import CURRENCY, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_PROVIDER, LLM_VISION_MODEL
 from app.llm_provider import create_provider
-from app.skills import TOOL_DEFINITIONS, execute_skill
+from app.mcp_tools.registry import execute_tool, get_all_tools
+from app.memory import format_memories_for_prompt, recall_memories, store_memory
+from app.session import Session, build_system_prompt_for_session
+from app.skills import execute_skill  # fallback still uses skills directly
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = f"""你是一个家庭记账助手机器人。这个家庭有两个人（夫妻）。
+BASE_SYSTEM_PROMPT = f"""你是一个家庭记账助手机器人。这个家庭有两个人（夫妻）。
 默认货币是 {CURRENCY}。
 
 你可以帮助用户：
-1. 记录日常支出（调用 record_expense），支持多币种
-2. 查询支出情况（调用 query_monthly_total / query_category_total / query_summary）
-3. 设置和查看预算（调用 set_budget / query_budget）
-4. 分析消费习惯并给出财务建议（调用 get_spending_analysis）
-5. 删除误记的支出（调用 delete_last_expense）
-6. 管理事件/旅行标签（调用 start_event / stop_event / query_event_summary）
-7. 导出数据为 CSV（调用 export_csv）
+1. 记录日常支出（record_expense），支持多币种
+2. 查询支出（query_monthly_total / query_category_total / query_summary）
+3. 预算管理（set_budget / query_budget）
+4. 消费分析与财务建议（get_spending_analysis）
+5. 删除误记（delete_last_expense）
+6. 事件/旅行标签（start_event / stop_event / query_event_summary）
+7. 导出CSV（export_csv）
+8. 长期记忆（store_memory / recall_memories / forget_memory）
 
-回复规则：
+重要：
 - 用简洁友好的中文回复
 - 金额后面带货币单位
 - 如果用户用非 {CURRENCY} 货币记账，回复中提示已自动折算
 - 如果 skill 返回了 budget_alert，一定要在回复中提醒用户
 - 如果用户的消息包含多笔消费，每笔都分别调用 record_expense
-- 对于事件汇总，展示每人花费和 AA 结算建议
+
+记忆规则：
+- 当用户表达偏好（如"我不喜欢在外面吃"）、设定目标（如"这个月减少打车"）、做出家庭决定（如"下个月开始存钱"）时，主动调用 store_memory
+- 当用户的消息涉及过去讨论的话题时，可以调用 recall_memories 检索相关记忆
+- 回复中自然地引用记忆，不要刻意强调"我的记忆显示..."
 """
 
 VISION_PROMPT = f"""你是一个 OCR 助手。请识别这张图片中的消费信息。
 
 提取以下信息并返回严格的 JSON（不要包含其他文字）：
-- 如果是收据/小票，提取每一项消费
-- 如果是截图（打车、外卖等），提取总金额
-
-返回格式（数组）：
 [{{"category": "分类", "amount": 金额, "note": "备注", "currency": "货币代码"}}]
 
 可选分类：餐饮、交通、购物、娱乐、生活、医疗、其他
 默认货币：{CURRENCY}
-如果图片中有其他货币（如 ¥ 为 CNY，$ 可能是 USD 或 SGD，请根据上下文判断），请正确填写 currency 字段。
-
-如果无法识别消费信息，返回：
-[{{"error": "无法识别"}}]
+如果无法识别，返回：[{{"error": "无法识别"}}]
 """
 
-# Lazy-init provider
+# Lazy-init providers
 _provider = None
 _vision_provider = None
 
@@ -79,11 +80,11 @@ def _get_vision_provider():
 
 
 # ═══════════════════════════════════════════
-#  Text message handling
+#  Main entry: text messages
 # ═══════════════════════════════════════════
 
-async def agent_handle(text: str, user_id: int, user_name: str) -> str:
-    """Main agent entry for text messages."""
+async def agent_handle(text: str, user_id: int, user_name: str, session: Session) -> str:
+    """Main agent entry: memory-augmented, session-aware processing."""
     if not LLM_API_KEY or not is_within_limit():
         if not LLM_API_KEY:
             logger.info("No API key, using fallback")
@@ -92,23 +93,34 @@ async def agent_handle(text: str, user_id: int, user_name: str) -> str:
         return _fallback_handle(text, user_id, user_name)
 
     try:
-        return await _llm_agent_loop(text, user_id, user_name)
+        return await _llm_agent_loop(text, user_id, user_name, session)
     except Exception:
         logger.exception("Agent LLM loop failed, falling back")
         return _fallback_handle(text, user_id, user_name)
 
 
-async def _llm_agent_loop(text: str, user_id: int, user_name: str) -> str:
+async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Session) -> str:
     provider = _get_provider()
     if provider is None:
         return _fallback_handle(text, user_id, user_name)
 
+    # Step 1: Recall relevant memories
+    memories = recall_memories(user_id, text, limit=5)
+    memories_text = format_memories_for_prompt(memories)
+
+    # Step 2: Build session-aware system prompt
+    system_prompt = build_system_prompt_for_session(session, BASE_SYSTEM_PROMPT, memories_text)
+
+    # Step 3: Get all MCP tools
+    tools = get_all_tools()
+
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": text},
     ]
 
-    resp_msg, usage = await provider.chat_completion(messages, tools=TOOL_DEFINITIONS)
+    # Step 4: LLM call
+    resp_msg, usage = await provider.chat_completion(messages, tools=tools)
     if usage:
         record_usage(user_id, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), usage.get("total_tokens", 0), LLM_MODEL)
 
@@ -116,18 +128,19 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str) -> str:
     if not tool_calls:
         return resp_msg.get("content", "🤔 我没有理解你的意思，请输入 /help 查看帮助。")
 
+    # Step 5: Execute tool calls (via MCP registry)
     messages.append(resp_msg)
 
     for tc in tool_calls:
         func = tc.get("function", {})
-        skill_name = func.get("name", "")
+        tool_name = func.get("name", "")
         try:
             params = json.loads(func.get("arguments", "{}"))
         except json.JSONDecodeError:
             params = {}
 
-        result = execute_skill(skill_name, user_id, user_name, params)
-        logger.info("Skill %s → %s", skill_name, json.dumps(result, ensure_ascii=False)[:200])
+        result = execute_tool(tool_name, user_id, user_name, params)
+        logger.info("Tool %s → %s", tool_name, json.dumps(result, ensure_ascii=False)[:200])
 
         messages.append({
             "role": "tool",
@@ -135,7 +148,8 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str) -> str:
             "content": json.dumps(result, ensure_ascii=False),
         })
 
-    final_msg, usage2 = await provider.chat_completion(messages, tools=TOOL_DEFINITIONS)
+    # Step 6: Final LLM call for human-readable reply
+    final_msg, usage2 = await provider.chat_completion(messages, tools=tools)
     if usage2:
         record_usage(user_id, usage2.get("prompt_tokens", 0), usage2.get("completion_tokens", 0), usage2.get("total_tokens", 0), LLM_MODEL)
 
@@ -167,7 +181,6 @@ async def agent_handle_image(
         if usage:
             record_usage(user_id, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), usage.get("total_tokens", 0), LLM_MODEL)
 
-        # Parse OCR result
         content = content.strip()
         if content.startswith("```"):
             content = re.sub(r"^```(?:json)?\s*", "", content)
@@ -180,10 +193,9 @@ async def agent_handle_image(
         if items and items[0].get("error"):
             return f"📷 无法识别图片中的消费信息：{items[0]['error']}\n请手动输入。"
 
-        # Record each expense
         replies = []
         for item in items:
-            result = execute_skill("record_expense", user_id, user_name, {
+            result = execute_tool("record_expense", user_id, user_name, {
                 "category": item.get("category", "其他"),
                 "amount": item.get("amount", 0),
                 "note": item.get("note", "收据"),
@@ -210,12 +222,12 @@ async def agent_handle_image(
 
 
 # ═══════════════════════════════════════════
-#  CSV export helper (returns file content)
+#  CSV export helper
 # ═══════════════════════════════════════════
 
 async def agent_handle_export(user_id: int, user_name: str, scope: str = "me") -> Optional[str]:
     """Handle /export command. Returns CSV content or None."""
-    result = execute_skill("export_csv", user_id, user_name, {"scope": scope})
+    result = execute_tool("export_csv", user_id, user_name, {"scope": scope})
     if result.get("success"):
         return result.get("csv_content", "")
     return None

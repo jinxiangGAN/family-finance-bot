@@ -1,4 +1,4 @@
-"""Telegram bot handlers and command definitions (Agent architecture v2)."""
+"""Telegram bot handlers (Agent v3: memory + session + proactive)."""
 
 import io
 import logging
@@ -26,8 +26,9 @@ from app.config import (
     WEEKLY_SUMMARY_DAY,
     WEEKLY_SUMMARY_HOUR,
 )
-from app.scheduler import weekly_summary_job
+from app.scheduler import budget_alert_job, proactive_nudge_job, weekly_summary_job
 from app.services.expense_service import delete_last_expense
+from app.session import get_or_create_session
 
 logger = logging.getLogger(__name__)
 
@@ -47,25 +48,37 @@ async def _check_access(update: Update) -> bool:
     return False
 
 
+def _get_session(update: Update):
+    """Extract session from update."""
+    user = update.effective_user  # type: ignore[union-attr]
+    chat = update.effective_chat  # type: ignore[union-attr]
+    return get_or_create_session(
+        user_id=user.id,
+        user_name=user.full_name or user.username or str(user.id),
+        chat_id=chat.id,
+        chat_type=chat.type,
+    )
+
+
 # ───────────────── Commands ─────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_access(update):
         return
+    session = _get_session(update)
+    greeting = f"👋 {session.display_name}，" if session.is_private else "👋 "
     await update.message.reply_text(  # type: ignore[union-attr]
-        "👋 欢迎使用家庭记账机器人！\n\n"
-        "📝 *记账*：发送文字 `午饭 35` 或拍照发送收据\n"
-        "🔍 *查询*：\n"
-        "  `本月花了多少` / `老婆花了多少` / `总共花了多少`\n"
+        f"{greeting}欢迎使用家庭记账机器人！\n\n"
+        "📝 *记账*：`午饭 35` 或发送收据照片\n"
+        "🔍 *查询*：`本月花了多少` / `老婆花了多少`\n"
         "📊 *汇总*：`本月汇总` / `家庭汇总`\n"
         "💰 *预算*：`餐饮预算设为1000` / `预算还剩多少`\n"
-        "🏷 *事件*：`开始日本旅行` / `结束旅行` / `日本旅行汇总`\n"
-        "📈 *分析*：`分析一下消费` / `怎么省钱`\n"
-        "📷 *收据*：直接发送收据照片自动识别\n"
-        "📤 *导出*：/export 导出 CSV\n"
-        "🗑 *撤销*：/delete\n"
-        "❓ *帮助*：/help\n\n"
-        f"💰 默认货币：{CURRENCY} | LLM: {LLM_PROVIDER}",
+        "🏷 *事件*：`开始日本旅行` / `结束旅行`\n"
+        "🧠 *记忆*：我会记住你的偏好和目标\n"
+        "📷 *收据*：发送照片自动识别\n"
+        "📤 *导出*：/export\n\n"
+        "📌 *命令*：/help /delete /export /usage /memory\n\n"
+        f"💰 {CURRENCY} | 🤖 {LLM_PROVIDER}",
         parse_mode="Markdown",
     )
 
@@ -74,35 +87,43 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_access(update):
         return
     cats = "、".join(CATEGORIES)
-    await update.message.reply_text(  # type: ignore[union-attr]
+    session = _get_session(update)
+
+    help_text = (
         "📖 *使用帮助*\n\n"
         "*记账*\n"
-        "  文字：`午饭 35`  `打车 18`\n"
-        "  多币种：`午饭 50 人民币`  `taxi 15 AUD`\n"
-        "  拍照：发送收据照片自动识别\n\n"
-        "*查询*（三个视角）\n"
+        "  `午饭 35`  `打车 18`  `午饭 50 人民币`\n"
+        "  发送收据照片自动识别\n\n"
+        "*查询*\n"
         "  👤 `本月花了多少` / `餐饮花了多少`\n"
         "  👫 `老婆花了多少`\n"
         "  👨‍👩‍👧 `总共花了多少` / `家庭汇总`\n\n"
-        "*预算管理*\n"
-        "  `餐饮预算设为1000` / `总预算设为5000`\n"
-        "  `预算还剩多少`\n\n"
-        "*事件/旅行标签*\n"
-        "  `开始日本旅行` — 后续记账自动标记\n"
-        "  `结束旅行` — 关闭标签\n"
-        "  `日本旅行汇总` — 查看事件花费和AA结算\n\n"
+        "*预算*\n"
+        "  `餐饮预算设为1000` / `预算还剩多少`\n\n"
+        "*事件标签*\n"
+        "  `开始日本旅行` → `结束旅行` → `日本旅行汇总`\n\n"
         "*智能功能*\n"
-        "  `分析一下消费` / `怎么省钱` / `财务规划`\n\n"
+        "  `分析消费` / `怎么省钱` / `财务规划`\n\n"
+        "*记忆*\n"
+        "  我会自动记住你的偏好和目标\n"
+        "  `你还记得什么` — 查看记忆\n"
+        "  `忘掉XX` — 删除某条记忆\n\n"
         "*命令*\n"
         "  /start — 开始\n"
         "  /help — 帮助\n"
         "  /delete — 删除最近一条\n"
-        "  /export — 导出 CSV 文件\n"
-        "  /usage — API 用量\n\n"
+        "  /export — 导出 CSV\n"
+        "  /export family — 导出家庭 CSV\n"
+        "  /usage — API 用量\n"
+        "  /memory — 查看我的记忆\n\n"
         f"*分类*：{cats}\n"
-        f"*货币*：{CURRENCY}（支持 CNY/USD/AUD/JPY/MYR/EUR 等）",
-        parse_mode="Markdown",
+        f"*货币*：{CURRENCY}（支持 CNY/USD/AUD/JPY/MYR/EUR 等）"
     )
+
+    if session.is_group:
+        help_text += "\n\n💡 在群聊中，我会以家庭视角回复，保护个人隐私。"
+
+    await update.message.reply_text(help_text, parse_mode="Markdown")  # type: ignore[union-attr]
 
 
 async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -119,13 +140,11 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Export expenses as CSV file."""
     if not await _check_access(update):
         return
     user_id = update.effective_user.id  # type: ignore[union-attr]
     user_name = update.effective_user.full_name or str(user_id)  # type: ignore[union-attr]
 
-    # Check if user wants family export
     scope = "family" if context.args and context.args[0] == "family" else "me"
 
     csv_content = await agent_handle_export(user_id, user_name, scope)
@@ -133,7 +152,7 @@ async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         tz = ZoneInfo(TIMEZONE)
         now = datetime.now(tz)
         filename = f"expenses_{scope}_{now.strftime('%Y%m%d')}.csv"
-        buf = io.BytesIO(csv_content.encode("utf-8-sig"))  # BOM for Excel compat
+        buf = io.BytesIO(csv_content.encode("utf-8-sig"))
         buf.name = filename
         await update.message.reply_document(  # type: ignore[union-attr]
             document=buf,
@@ -166,10 +185,32 @@ async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show current memories for the user."""
+    if not await _check_access(update):
+        return
+    user_id = update.effective_user.id  # type: ignore[union-attr]
+
+    from app.memory import get_recent_memories
+    memories = get_recent_memories(user_id, limit=15)
+
+    if not memories:
+        await update.message.reply_text("🧠 我还没有记住任何信息。和我多聊聊吧！")  # type: ignore[union-attr]
+        return
+
+    lines = ["🧠 *我记住的信息*\n"]
+    for m in memories:
+        prefix = "🔴" if m["importance"] >= 8 else "🟡" if m["importance"] >= 5 else "🟢"
+        lines.append(f"  {prefix} #{m['id']} [{m['category']}] {m['content']}")
+
+    lines.append("\n💡 说「忘掉 #ID」可以删除某条记忆")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")  # type: ignore[union-attr]
+
+
 # ───────────────── Message handlers ─────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Route text messages through the LLM agent."""
+    """Route text messages through the session-aware LLM agent."""
     if not await _check_access(update):
         return
 
@@ -180,10 +221,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = update.effective_user  # type: ignore[union-attr]
     user_id: int = user.id
     user_name: str = user.full_name or user.username or str(user_id)
+    session = _get_session(update)
 
     await update.message.chat.send_action("typing")  # type: ignore[union-attr]
 
-    reply = await agent_handle(text, user_id, user_name)
+    reply = await agent_handle(text, user_id, user_name, session)
     await update.message.reply_text(reply)  # type: ignore[union-attr]
 
 
@@ -196,10 +238,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_id: int = user.id
     user_name: str = user.full_name or user.username or str(user_id)
 
-    # Get the highest resolution photo
     photo = update.message.photo[-1]  # type: ignore[union-attr]
     file = await photo.get_file()
-    image_url = file.file_path  # Telegram file URL
+    image_url = file.file_path
 
     caption = update.message.caption or ""  # type: ignore[union-attr]
 
@@ -212,7 +253,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ───────────────── Bot builder ─────────────────
 
 def build_application() -> Application:
-    """Create and configure the Telegram bot Application."""
+    """Create and configure the Telegram bot Application with all scheduled jobs."""
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Commands
@@ -221,6 +262,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("usage", cmd_usage))
+    app.add_handler(CommandHandler("memory", cmd_memory))
 
     # Text messages → agent
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -228,17 +270,33 @@ def build_application() -> Application:
     # Photo messages → Receipt OCR
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    # Weekly summary job
+    # ── Scheduled Jobs ──
     tz = ZoneInfo(TIMEZONE)
+
+    # 1. Weekly summary (Sunday evening)
     app.job_queue.run_daily(  # type: ignore[union-attr]
         weekly_summary_job,
         time=time(hour=WEEKLY_SUMMARY_HOUR, minute=0, tzinfo=tz),
         days=(WEEKLY_SUMMARY_DAY,),
         name="weekly_summary",
     )
-    logger.info(
-        "Weekly summary scheduled: day=%s hour=%s tz=%s",
-        WEEKLY_SUMMARY_DAY, WEEKLY_SUMMARY_HOUR, TIMEZONE,
+    logger.info("Scheduled: weekly summary — day=%s hour=%s", WEEKLY_SUMMARY_DAY, WEEKLY_SUMMARY_HOUR)
+
+    # 2. Proactive nudge (Friday 6PM)
+    app.job_queue.run_daily(  # type: ignore[union-attr]
+        proactive_nudge_job,
+        time=time(hour=18, minute=0, tzinfo=tz),
+        days=(4,),  # Friday = 4 (Monday=0)
+        name="proactive_nudge",
     )
+    logger.info("Scheduled: proactive nudge — Friday 18:00")
+
+    # 3. Daily budget alert (9PM)
+    app.job_queue.run_daily(  # type: ignore[union-attr]
+        budget_alert_job,
+        time=time(hour=21, minute=0, tzinfo=tz),
+        name="budget_alert",
+    )
+    logger.info("Scheduled: daily budget alert — 21:00")
 
     return app
