@@ -387,6 +387,46 @@ def skill_export_csv(user_id: int, user_name: str, params: dict) -> dict:
     }
 
 
+def skill_query_monthly_archive(user_id: int, user_name: str, params: dict) -> dict:
+    """查询已归档的历史月度账单。"""
+    year = int(params.get("year", 0))
+    month = int(params.get("month", 0))
+    if not (1 <= month <= 12) or year < 2020:
+        return {"success": False, "message": "请提供有效的年月，如 year=2026, month=2"}
+
+    scope = params.get("scope", "family")
+    if scope == "me":
+        uid = user_id
+        label = get_member_name(user_id)
+    elif scope == "spouse":
+        sid = get_spouse_id(user_id)
+        uid = sid if sid is not None else user_id
+        label = get_member_name(uid)
+    else:
+        uid = None  # family → user_id=0 in get_monthly_archive
+        label = "家庭"
+
+    rows = get_monthly_archive(year, month, user_id=uid)
+    if not rows:
+        return {
+            "success": True,
+            "message": f"{year}年{month}月暂无归档数据。可能还未到归档时间，或该月没有记录。",
+            "summary": [],
+            "grand_total": 0,
+        }
+
+    grand_total = sum(r["total"] for r in rows)
+    currency = rows[0]["currency"] if rows else CURRENCY
+
+    return {
+        "success": True,
+        "label": f"{label} {year}年{month}月",
+        "summary": rows,
+        "grand_total": round(grand_total, 2),
+        "currency": currency,
+    }
+
+
 # ═══════════════════════════════════════════
 #  Skill registry & function schemas
 # ═══════════════════════════════════════════
@@ -622,46 +662,6 @@ def _check_budget_alert(user_id: int, category: str) -> Optional[str]:
                 alerts.append(f"⚡ 家庭总支出已用预算 {spent/limit_val*100:.0f}%（{spent:.2f}/{limit_val:.2f} {CURRENCY}）")
 
     return "\n".join(alerts) if alerts else None
-
-
-def skill_query_monthly_archive(user_id: int, user_name: str, params: dict) -> dict:
-    """查询已归档的历史月度账单。"""
-    year = int(params.get("year", 0))
-    month = int(params.get("month", 0))
-    if not (1 <= month <= 12) or year < 2020:
-        return {"success": False, "message": "请提供有效的年月，如 year=2026, month=2"}
-
-    scope = params.get("scope", "family")
-    if scope == "me":
-        uid = user_id
-        label = get_member_name(user_id)
-    elif scope == "spouse":
-        sid = get_spouse_id(user_id)
-        uid = sid if sid is not None else user_id
-        label = get_member_name(uid)
-    else:
-        uid = None  # family → user_id=0 in get_monthly_archive
-        label = "家庭"
-
-    rows = get_monthly_archive(year, month, user_id=uid)
-    if not rows:
-        return {
-            "success": True,
-            "message": f"{year}年{month}月暂无归档数据。可能还未到归档时间，或该月没有记录。",
-            "summary": [],
-            "grand_total": 0,
-        }
-
-    grand_total = sum(r["total"] for r in rows)
-    currency = rows[0]["currency"] if rows else CURRENCY
-
-    return {
-        "success": True,
-        "label": f"{label} {year}年{month}月",
-        "summary": rows,
-        "grand_total": round(grand_total, 2),
-        "currency": currency,
-    }
 
 
 def execute_skill(skill_name: str, user_id: int, user_name: str, params: dict) -> dict:
