@@ -113,8 +113,9 @@ class LLMProvider:
                 and attempt < _MAX_RETRIES
             ):
                 body = resp.text[:500]
-                # Gemma / other models may not support function calling or vision
-                if "not enabled" in body or "not supported" in body:
+                # Gemma / other models may not support function calling or vision;
+                # Gemini lite / thinking models may require thought_signature
+                if "not enabled" in body or "not supported" in body or "thought_signature" in body:
                     next_m = self._next_model()
                     if next_m == payload.get("model") and len(self._models) > 2:
                         next_m = self._next_model()
