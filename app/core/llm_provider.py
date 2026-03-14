@@ -94,75 +94,91 @@ class LLMProvider:
 
     _RETRYABLE_STATUSES = {429, 503, 502, 500}
 
+    def _pick_model(self, exclude: set[str]) -> Optional[str]:
+        """Pick the next model not in *exclude*. Returns None if all excluded."""
+        for _ in range(len(self._models)):
+            m = self._next_model()
+            if m not in exclude:
+                return m
+        return None
+
     async def _post_with_retry(
         self, url: str, headers: dict, payload: dict,
-        *, pinned: bool = False,
     ) -> httpx.Response:
-        """POST with automatic retry on transient HTTP errors.
+        """POST with smart retry + model rotation.
 
-        - 429 (rate limit): rotate to next model instantly (no wait).
+        Strategy:
+        - 400 (capability error): ban model, rotate to next compatible one.
+        - 429 (rate limit):  rotate to a non-banned model instantly.
+          If all alternatives are banned → wait and retry same model.
         - 503/502/500 (server error): wait and retry same model.
-        - *pinned*=True: model is locked for a tool chain — on 429, wait
-          and retry the SAME model instead of rotating (avoids cross-model
-          thought_signature incompatibility).
+        - Budget: len(models) + _MAX_RETRIES to allow trying all models
+          plus actual retries with wait.
         """
-        for attempt in range(1, _MAX_RETRIES + 1):
+        incompatible: set[str] = set()  # models that returned 400 capability error
+        original_model = payload["model"]
+        max_attempts = len(self._models) + _MAX_RETRIES
+
+        for attempt in range(1, max_attempts + 1):
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 resp = await client.post(url, headers=headers, json=payload)
 
-            # ── Handle 400 "model doesn't support X" → rotate model ──
-            if (
-                resp.status_code == 400
-                and len(self._models) > 1
-                and attempt < _MAX_RETRIES
-                and not pinned
-            ):
-                body = resp.text[:500]
-                # Gemma / other models may not support function calling or vision;
-                # Gemini lite / thinking models may require thought_signature
-                if "not enabled" in body or "not supported" in body or "thought_signature" in body:
-                    next_m = self._next_model()
-                    if next_m == payload.get("model") and len(self._models) > 2:
-                        next_m = self._next_model()
-                    logger.warning(
-                        "[LLM] 400 capability error on %s → rotating to %s (%d/%d): %s",
-                        payload.get("model", "?"), next_m, attempt, _MAX_RETRIES,
-                        body[:120],
-                    )
-                    payload["model"] = next_m
-                    continue  # retry with capable model
+            current_model = payload.get("model", "?")
 
+            # ── 400 capability error → ban this model, rotate ──
+            if resp.status_code == 400:
+                body = resp.text[:500]
+                if ("not enabled" in body or "not supported" in body
+                        or "thought_signature" in body):
+                    incompatible.add(current_model)
+                    alt = self._pick_model(incompatible)
+                    if alt:
+                        logger.warning(
+                            "[LLM] 400 capability on %s → rotating to %s (%d/%d): %s",
+                            current_model, alt, attempt, max_attempts, body[:120],
+                        )
+                        payload["model"] = alt
+                        continue
+                    else:
+                        # All models incompatible — nothing we can do
+                        logger.error("[LLM] All models incompatible: %s", incompatible)
+
+            # ── Non-retryable status → fail immediately ──
             if resp.status_code not in self._RETRYABLE_STATUSES:
                 if resp.status_code >= 400:
-                    # Log error body for debugging (400, 401, 403, 404, etc.)
                     logger.error(
                         "[LLM] HTTP %d from model=%s — %s",
-                        resp.status_code, payload.get("model", "?"),
-                        resp.text[:500],
+                        resp.status_code, current_model, resp.text[:500],
                     )
                 resp.raise_for_status()
                 return resp
 
-            if resp.status_code == 429 and len(self._models) > 1 and not pinned:
-                # Rate limited — rotate model and retry instantly
-                next_m = self._next_model()
-                # Skip if same model came up in rotation
-                if next_m == payload.get("model") and len(self._models) > 1:
-                    next_m = self._next_model()
-                logger.warning(
-                    "[LLM] 429 on %s → rotating to %s (%d/%d)",
-                    payload.get("model", "?"), next_m, attempt, _MAX_RETRIES,
-                )
-                payload["model"] = next_m
-                # No sleep — different model has its own quota
-            else:
-                # 503/502/500, or 429 with single model / pinned mode — wait and retry same model
+            # ── 429 rate limit → try another model instantly ──
+            if resp.status_code == 429:
+                alt = self._pick_model(incompatible | {current_model})
+                if alt:
+                    logger.warning(
+                        "[LLM] 429 on %s → rotating to %s (%d/%d)",
+                        current_model, alt, attempt, max_attempts,
+                    )
+                    payload["model"] = alt
+                    continue  # instant, no wait — different quota pool
+
+                # All alternatives either incompatible or same model
+                # → wait and retry current model (its quota will refresh)
                 retry_after = int(resp.headers.get("Retry-After", _DEFAULT_RETRY_WAIT))
                 logger.warning(
-                    "[LLM] HTTP %d on %s%s, retry %d/%d after %ds",
-                    resp.status_code, payload.get("model", "?"),
-                    " (pinned)" if pinned else "",
-                    attempt, _MAX_RETRIES, retry_after,
+                    "[LLM] 429 on %s, no alternative available, waiting %ds (%d/%d)",
+                    current_model, retry_after, attempt, max_attempts,
+                )
+                await asyncio.sleep(retry_after)
+            else:
+                # 503/502/500 — wait and retry same model
+                retry_after = int(resp.headers.get("Retry-After", _DEFAULT_RETRY_WAIT))
+                logger.warning(
+                    "[LLM] HTTP %d on %s, retry %d/%d after %ds",
+                    resp.status_code, current_model,
+                    attempt, max_attempts, retry_after,
                 )
                 await asyncio.sleep(retry_after)
 
@@ -197,7 +213,7 @@ class LLMProvider:
         if tools:
             payload["tools"] = tools
 
-        resp = await self._post_with_retry(url, headers, payload, pinned=model is not None)
+        resp = await self._post_with_retry(url, headers, payload)
 
         # payload["model"] may have changed during retry/rotation
         model_used = payload["model"]
