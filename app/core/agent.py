@@ -187,9 +187,13 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
     pinned_model = model_used
     logger.info("[AGENT] Pinning model=%s for tool chain", pinned_model)
 
+    # Collect tool results so we can hand off to another model if pinned model dies
+    last_tool_results: list[tuple[str, str]] = []  # [(tool_name, result_json), ...]
+
     MAX_TOOL_ROUNDS = 3
     for _round in range(MAX_TOOL_ROUNDS):
         messages.append(resp_msg)
+        last_tool_results.clear()
 
         for tc in tool_calls:
             func = tc.get("function", {})
@@ -201,17 +205,33 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
 
             logger.info("[LLM_INTENT] Round %d — Calling tool: %s with args: %s", _round + 1, tool_name, json.dumps(params, ensure_ascii=False)[:300])
             result = await execute_tool(tool_name, user_id, user_name, params)
-            logger.info("[TOOL_RESULT] %s → success=%s %s", tool_name, result.get("success"), json.dumps(result, ensure_ascii=False)[:200])
+            result_json = json.dumps(result, ensure_ascii=False)
+            logger.info("[TOOL_RESULT] %s → success=%s %s", tool_name, result.get("success"), result_json[:200])
 
+            last_tool_results.append((tool_name, result_json))
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id", ""),
-                "content": json.dumps(result, ensure_ascii=False),
+                "content": result_json,
             })
 
-        # Let LLM synthesise a reply (or decide to call more tools)
-        # Use pinned model to keep thought_signature / context compatible
-        resp_msg, usage2, _ = await provider.chat_completion(messages, tools=tools, model=pinned_model)
+        # Let LLM synthesise a reply (or decide to call more tools).
+        # Use pinned model first; if it fails, hand off to any available model.
+        try:
+            resp_msg, usage2, _ = await provider.chat_completion(messages, tools=tools, model=pinned_model)
+        except httpx.HTTPStatusError:
+            # Pinned model (and all alternatives via retry) exhausted.
+            # Hand off: send tool results as plain text to ANY model (no function calling).
+            logger.warning(
+                "[AGENT] Pinned model %s failed, handing off tool results to fresh model",
+                pinned_model,
+            )
+            resp_msg, usage2 = await _handoff_to_fresh_model(
+                provider, system_prompt, text, last_tool_results,
+            )
+            tool_calls = None
+            break
+
         if usage2:
             record_usage(
                 user_id,
@@ -235,6 +255,43 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
     mm.add_working_turn(user_id, chat_id, "assistant", reply)
 
     return reply
+
+
+async def _handoff_to_fresh_model(
+    provider,
+    system_prompt: str,
+    user_text: str,
+    tool_results: list[tuple[str, str]],
+) -> tuple[dict, Optional[dict]]:
+    """When the pinned model dies mid-chain, hand off to ANY model.
+
+    Tool results are already available — we just need a model to synthesise
+    a human-readable reply. No function calling needed, so any model works
+    (no thought_signature issues).
+    """
+    # Build tool results as plain text context
+    result_lines = []
+    for name, result_json in tool_results:
+        result_lines.append(f"[{name}]: {result_json}")
+    context = "\n".join(result_lines)
+
+    handoff_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text},
+        {
+            "role": "assistant",
+            "content": f"我已经查到了以下数据：\n{context}\n\n让我来整理一下回复。",
+        },
+        {
+            "role": "user",
+            "content": "请根据上面的数据，用自然语言回复用户。",
+        },
+    ]
+
+    # No tools=... → plain chat, any model can handle this
+    resp_msg, usage, model_used = await provider.chat_completion(handoff_messages)
+    logger.info("[AGENT] Handoff to %s succeeded", model_used)
+    return resp_msg, usage
 
 
 # ═══════════════════════════════════════════
