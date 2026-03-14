@@ -171,15 +171,20 @@ class LLMProvider:
         messages: list[dict],
         tools: Optional[list[dict]] = None,
         temperature: float = 0.3,
-    ) -> tuple[dict, Optional[dict]]:
-        """Call chat completion API. Returns (message, usage)."""
+        model: Optional[str] = None,
+    ) -> tuple[dict, Optional[dict], str]:
+        """Call chat completion API. Returns (message, usage, model_used).
+
+        Pass *model* to pin a specific model (e.g. during a tool-call chain)
+        instead of round-robin selection.
+        """
         url = f"{self.base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
         payload: dict = {
-            "model": self._next_model(),
+            "model": model or self._next_model(),
             "messages": messages,
             "temperature": temperature,
         }
@@ -188,12 +193,14 @@ class LLMProvider:
 
         resp = await self._post_with_retry(url, headers, payload)
 
+        # payload["model"] may have changed during retry/rotation
+        model_used = payload["model"]
         data = resp.json()
-        logger.debug("LLM [%s] response: %s", payload["model"], json.dumps(data, ensure_ascii=False)[:500])
+        logger.debug("LLM [%s] response: %s", model_used, json.dumps(data, ensure_ascii=False)[:500])
 
         message = data.get("choices", [{}])[0].get("message", {})
         usage = data.get("usage")
-        return message, usage
+        return message, usage, model_used
 
     # ── Vision ──
 

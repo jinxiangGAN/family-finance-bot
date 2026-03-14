@@ -159,15 +159,15 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
     # Step 4: Get MCP tools & call LLM
     tools = get_all_tools()
 
-    resp_msg, usage = await provider.chat_completion(messages, tools=tools)
+    resp_msg, usage, model_used = await provider.chat_completion(messages, tools=tools)
     if usage:
-        logger.info("[LLM_USAGE] prompt=%d completion=%d total=%d", usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), usage.get("total_tokens", 0))
+        logger.info("[LLM_USAGE] prompt=%d completion=%d total=%d model=%s", usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), usage.get("total_tokens", 0), model_used)
         record_usage(
             user_id,
             usage.get("prompt_tokens", 0),
             usage.get("completion_tokens", 0),
             usage.get("total_tokens", 0),
-            LLM_MODEL,
+            model_used,
         )
 
     tool_calls = resp_msg.get("tool_calls")
@@ -182,6 +182,11 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
     # Step 5–6: ReAct loop — execute tool calls then let LLM synthesise reply.
     # Supports chained tool calls: if the LLM's follow-up response also
     # contains tool_calls (e.g. "记账后顺便查预算"), keep iterating.
+    # PIN the same model for the entire tool chain to avoid cross-model
+    # incompatibilities (e.g. thought_signature required by Gemini lite).
+    pinned_model = model_used
+    logger.info("[AGENT] Pinning model=%s for tool chain", pinned_model)
+
     MAX_TOOL_ROUNDS = 3
     for _round in range(MAX_TOOL_ROUNDS):
         messages.append(resp_msg)
@@ -205,14 +210,15 @@ async def _llm_agent_loop(text: str, user_id: int, user_name: str, session: Sess
             })
 
         # Let LLM synthesise a reply (or decide to call more tools)
-        resp_msg, usage2 = await provider.chat_completion(messages, tools=tools)
+        # Use pinned model to keep thought_signature / context compatible
+        resp_msg, usage2, _ = await provider.chat_completion(messages, tools=tools, model=pinned_model)
         if usage2:
             record_usage(
                 user_id,
                 usage2.get("prompt_tokens", 0),
                 usage2.get("completion_tokens", 0),
                 usage2.get("total_tokens", 0),
-                LLM_MODEL,
+                pinned_model,
             )
 
         tool_calls = resp_msg.get("tool_calls")
