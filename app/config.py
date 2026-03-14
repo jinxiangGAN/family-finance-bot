@@ -51,7 +51,7 @@ LOCATION: str = os.getenv("LOCATION", "Singapore")
 CURRENCY: str = os.getenv("CURRENCY", "SGD")
 
 # Expense categories
-CATEGORIES: list[str] = ["餐饮", "交通", "购物", "娱乐", "生活", "医疗", "其他"]
+CATEGORIES: list[str] = ["餐饮", "交通", "超市", "购物", "房租", "水电", "娱乐", "医疗", "其他"]
 
 # Weekly summary: day of week (0=Monday, 6=Sunday)
 WEEKLY_SUMMARY_DAY: int = int(os.getenv("WEEKLY_SUMMARY_DAY", "6"))
