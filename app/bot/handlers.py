@@ -1,7 +1,9 @@
 """Telegram bot handlers (Agent v3: memory + session + proactive)."""
 
+import base64
 import io
 import logging
+import mimetypes
 from datetime import datetime, time
 
 from telegram import Update
@@ -240,13 +242,24 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     photo = update.message.photo[-1]  # type: ignore[union-attr]
     file = await photo.get_file()
-    image_url = file.file_path
+
+    # Download image bytes and build a base64 data URL with correct MIME type.
+    # Gemini rejects plain Telegram file URLs (returns application/octet-stream).
+    img_bytes = await file.download_as_bytearray()
+    # Detect MIME from the file_path extension, fallback to image/jpeg
+    mime_type = "image/jpeg"
+    if file.file_path:
+        guessed, _ = mimetypes.guess_type(file.file_path)
+        if guessed and guessed.startswith("image/"):
+            mime_type = guessed
+    b64 = base64.b64encode(bytes(img_bytes)).decode()
+    image_data_url = f"data:{mime_type};base64,{b64}"
 
     caption = update.message.caption or ""  # type: ignore[union-attr]
 
     await update.message.chat.send_action("typing")  # type: ignore[union-attr]
 
-    reply = await agent_handle_image(image_url, caption, user_id, user_name)
+    reply = await agent_handle_image(image_data_url, caption, user_id, user_name)
     await update.message.reply_text(reply)  # type: ignore[union-attr]
 
 
