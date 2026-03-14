@@ -156,6 +156,12 @@ MIGRATIONS = [
     "ALTER TABLE expenses ADD COLUMN event_tag TEXT NOT NULL DEFAULT '';",
 ]
 
+# Category renames: old_name → new_name (applied to expenses + budgets on startup)
+_CATEGORY_RENAMES = {
+    "水电": "水电网",
+    "生活": "超市",   # old "生活" was mostly supermarket/daily items
+}
+
 
 def init_db() -> None:
     """Create the database file, tables, indexes, and FTS virtual tables."""
@@ -180,8 +186,31 @@ def init_db() -> None:
                 pass
         # Migrate legacy memories → episodic_memories
         _migrate_legacy_memories(conn)
+        # Rename old categories → new names
+        _migrate_category_renames(conn)
         conn.commit()
     logger.info("Database initialized at %s", DATABASE_PATH)
+
+
+def _migrate_category_renames(conn: sqlite3.Connection) -> None:
+    """Rename old expense/budget categories to new names (idempotent)."""
+    for old_name, new_name in _CATEGORY_RENAMES.items():
+        try:
+            cur = conn.execute(
+                "UPDATE expenses SET category = ? WHERE category = ?",
+                (new_name, old_name),
+            )
+            if cur.rowcount > 0:
+                logger.info("Migrated %d expenses: '%s' → '%s'", cur.rowcount, old_name, new_name)
+
+            cur = conn.execute(
+                "UPDATE budgets SET category = ? WHERE category = ?",
+                (new_name, old_name),
+            )
+            if cur.rowcount > 0:
+                logger.info("Migrated %d budgets: '%s' → '%s'", cur.rowcount, old_name, new_name)
+        except Exception:
+            logger.exception("Failed to rename category '%s' → '%s'", old_name, new_name)
 
 
 def _migrate_legacy_memories(conn: sqlite3.Connection) -> None:
