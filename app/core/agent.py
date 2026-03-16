@@ -442,6 +442,28 @@ def _guess_category(note: str) -> str:
 async def _fallback_handle(text: str, user_id: int, user_name: str) -> str:
     text = text.strip()
 
+    detail_keywords = ("明细", "每笔", "每一笔", "逐笔", "条目", "记录")
+    if any(k in text for k in detail_keywords):
+        scope = "me"
+        if any(k in text for k in ("家庭", "总共", "一共")):
+            scope = "family"
+        elif any(k in text for k in ("老婆", "老公", "妻子", "丈夫")):
+            scope = "spouse"
+        from app.config import CATEGORIES
+        cat = None
+        for c in CATEGORIES:
+            if c in text:
+                cat = c
+                break
+        if cat:
+            result = await execute_tool(
+                "query_category_items",
+                user_id,
+                user_name,
+                {"category": cat, "scope": scope, "limit": 20},
+            )
+            return _format_category_items(result)
+
     if "汇总" in text:
         scope = "family" if any(k in text for k in ("家庭", "总", "一共")) else "me"
         if any(k in text for k in ("老婆", "老公", "妻子", "丈夫")):
@@ -520,4 +542,26 @@ def _format_budget(result: dict) -> str:
             f"  {b['category']}：{b['spent']:.2f}/{b['monthly_limit']:.2f} {CURRENCY} "
             f"（剩余 {b['remaining']:.2f}）{status}"
         )
+    return "\n".join(lines)
+
+
+def _format_category_items(result: dict) -> str:
+    if not result.get("success", True):
+        return result.get("message", "查询失败。")
+
+    items = result.get("items", [])
+    if not items:
+        return f"📋 {result['label']}本月{result['category']}暂无支出记录。"
+
+    lines = [f"📋 {result['label']} · 本月{result['category']}明细\n"]
+    for item in items:
+        note = item.get("note") or "无备注"
+        amount = item.get("amount_sgd", item.get("amount", 0))
+        line = f"  #{item['id']} {note}：{amount:.2f} {CURRENCY}"
+        if item.get("event_tag"):
+            line += f" [{item['event_tag']}]"
+        if result["label"] == "家庭":
+            line += f" · {item.get('user_name', '')}"
+        lines.append(line)
+    lines.append(f"\n共 {result['count']} 笔")
     return "\n".join(lines)

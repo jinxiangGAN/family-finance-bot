@@ -2,6 +2,7 @@
 
 from app.config import CATEGORIES
 from app.services.skills import (
+    skill_query_category_items,
     skill_get_spending_analysis,
     skill_query_budget,
     skill_query_category_total,
@@ -36,6 +37,22 @@ TOOLS = [
                 "properties": {
                     "category": {"type": "string", "description": "Expense category to query", "enum": CATEGORIES},
                     "scope": {"type": "string", "description": "Query scope", "enum": ["me", "spouse", "family"]},
+                },
+                "required": ["category", "scope"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_category_items",
+            "description": "Query itemized expenses for a specific category in the current month.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "Expense category to query", "enum": CATEGORIES},
+                    "scope": {"type": "string", "description": "Query scope", "enum": ["me", "spouse", "family"]},
+                    "limit": {"type": "integer", "description": "Max number of records to return, default 20"},
                 },
                 "required": ["category", "scope"],
             },
@@ -113,6 +130,7 @@ TOOLS = [
 HANDLERS = {
     "query_monthly_total": skill_query_monthly_total,
     "query_category_total": skill_query_category_total,
+    "query_category_items": skill_query_category_items,
     "query_summary": skill_query_summary,
     "set_budget": skill_set_budget,
     "query_budget": skill_query_budget,

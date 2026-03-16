@@ -62,6 +62,40 @@ def get_recent_expenses(user_id: int, limit: int = 10) -> list[Expense]:
     return [_row_to_expense(r) for r in rows]
 
 
+def get_expenses(
+    user_ids: Optional[list[int]] = None,
+    category: str = "",
+    start: str = "",
+    end: str = "",
+    limit: int = 20,
+) -> list[Expense]:
+    """Query expenses with optional user/category/month filters."""
+    conditions = []
+    params: list = []
+
+    if user_ids:
+        placeholders = ",".join("?" for _ in user_ids)
+        conditions.append(f"user_id IN ({placeholders})")
+        params.extend(user_ids)
+    if category:
+        conditions.append("category = ?")
+        params.append(category)
+    if start:
+        conditions.append("datetime(created_at) >= datetime(?)")
+        params.append(start)
+    if end:
+        conditions.append("datetime(created_at) < datetime(?)")
+        params.append(end)
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = f"SELECT * FROM expenses {where} ORDER BY datetime(created_at) DESC, id DESC LIMIT ?"
+    params.append(limit)
+
+    with get_connection() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [_row_to_expense(r) for r in rows]
+
+
 def export_expenses_csv(user_id: Optional[int] = None, event_tag: str = "") -> str:
     """Export expenses to CSV string. Optionally filter by user_id and/or event_tag."""
     conditions = []

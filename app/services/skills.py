@@ -13,7 +13,12 @@ from zoneinfo import ZoneInfo
 from app.config import CATEGORIES, CURRENCY, FAMILY_MEMBERS, TIMEZONE
 from app.database import get_connection
 from app.models.expense import Expense
-from app.services.expense_service import delete_last_expense, export_expenses_csv, save_expense
+from app.services.expense_service import (
+    delete_last_expense,
+    export_expenses_csv,
+    get_expenses,
+    save_expense,
+)
 from app.services.stats_service import (
     get_category_total,
     get_member_name,
@@ -183,6 +188,56 @@ def skill_query_summary(user_id: int, user_name: str, params: dict) -> dict:
         "label": label,
         "summary": summary,
         "grand_total": grand_total,
+        "currency": CURRENCY,
+    }
+
+
+def skill_query_category_items(user_id: int, user_name: str, params: dict) -> dict:
+    """Query itemized expenses for a category in the current month."""
+    scope = params.get("scope", "me")
+    category = params.get("category", "其他")
+    limit = min(max(int(params.get("limit", 20)), 1), 100)
+    if scope == "spouse" and get_spouse_id(user_id) is None:
+        return {"success": False, "message": "未配置配偶账号，无法查询配偶账单"}
+
+    user_ids = resolve_user_ids(scope, user_id)
+    tz = ZoneInfo(TIMEZONE)
+    now = datetime.now(tz)
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if now.month == 12:
+        end = start.replace(year=now.year + 1, month=1)
+    else:
+        end = start.replace(month=now.month + 1)
+
+    expenses = get_expenses(
+        user_ids=user_ids,
+        category=category,
+        start=start.isoformat(),
+        end=end.isoformat(),
+        limit=limit,
+    )
+    label = _scope_label(scope, user_id)
+
+    items = [
+        {
+            "id": expense.id,
+            "user_name": expense.user_name,
+            "amount": expense.amount,
+            "currency": expense.currency,
+            "amount_sgd": expense.amount_sgd if expense.amount_sgd > 0 else expense.amount,
+            "note": expense.note,
+            "event_tag": expense.event_tag,
+            "created_at": expense.created_at,
+        }
+        for expense in expenses
+    ]
+
+    return {
+        "success": True,
+        "label": label,
+        "category": category,
+        "items": items,
+        "count": len(items),
         "currency": CURRENCY,
     }
 
@@ -447,6 +502,7 @@ SKILL_MAP: dict[str, Any] = {
     "delete_last_expense": skill_delete_last,
     "query_monthly_total": skill_query_monthly_total,
     "query_category_total": skill_query_category_total,
+    "query_category_items": skill_query_category_items,
     "query_summary": skill_query_summary,
     "set_budget": skill_set_budget,
     "query_budget": skill_query_budget,
@@ -509,6 +565,22 @@ TOOL_DEFINITIONS: list[dict] = [
                 "properties": {
                     "category": {"type": "string", "description": "支出分类", "enum": CATEGORIES},
                     "scope": {"type": "string", "description": "查询范围", "enum": ["me", "spouse", "family"]},
+                },
+                "required": ["category", "scope"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_category_items",
+            "description": "查询本月某个分类下的逐笔消费明细。用户说'餐饮明细'、'看看交通每一笔'时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "支出分类", "enum": CATEGORIES},
+                    "scope": {"type": "string", "description": "查询范围", "enum": ["me", "spouse", "family"]},
+                    "limit": {"type": "integer", "description": "最多返回多少条，默认20"},
                 },
                 "required": ["category", "scope"],
             },
