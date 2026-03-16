@@ -463,9 +463,13 @@ async def _fallback_handle(text: str, user_id: int, user_name: str) -> str:
                 break
         if cat:
             result = await execute_tool("query_category_total", user_id, user_name, {"category": cat, "scope": scope})
+            if not result.get("success", True):
+                return result.get("message", "查询失败。")
             return f"📊 {result['label']}本月{result['category']}支出：{result['total']:.2f} {CURRENCY}"
         else:
             result = await execute_tool("query_monthly_total", user_id, user_name, {"scope": scope})
+            if not result.get("success", True):
+                return result.get("message", "查询失败。")
             return f"📊 {result['label']}本月总支出：{result['total']:.2f} {CURRENCY}"
 
     if "预算" in text:
@@ -493,6 +497,8 @@ async def _fallback_handle(text: str, user_id: int, user_name: str) -> str:
 
 
 def _format_summary(result: dict) -> str:
+    if not result.get("success", True):
+        return result.get("message", "查询失败。")
     summary = result.get("summary", [])
     if not summary:
         return f"📊 {result['label']}本月暂无支出记录。"

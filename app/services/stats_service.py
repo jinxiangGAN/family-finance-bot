@@ -67,13 +67,14 @@ def get_month_total(user_ids: Optional[list[int]] = None) -> float:
         placeholders = ",".join("?" for _ in user_ids)
         sql = (
             f"SELECT {sum_expr} AS total FROM expenses "
-            f"WHERE user_id IN ({placeholders}) AND created_at >= ? AND created_at < ?"
+            f"WHERE user_id IN ({placeholders}) "
+            f"AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)"
         )
         params = [*user_ids, start, end]
     else:
         sql = (
             f"SELECT {sum_expr} AS total FROM expenses "
-            "WHERE created_at >= ? AND created_at < ?"
+            "WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)"
         )
         params = [start, end]
 
@@ -91,13 +92,13 @@ def get_category_total(category: str, user_ids: Optional[list[int]] = None) -> f
         sql = (
             f"SELECT {sum_expr} AS total FROM expenses "
             f"WHERE user_id IN ({placeholders}) AND category = ? "
-            f"AND created_at >= ? AND created_at < ?"
+            f"AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)"
         )
         params = [*user_ids, category, start, end]
     else:
         sql = (
             f"SELECT {sum_expr} AS total FROM expenses "
-            "WHERE category = ? AND created_at >= ? AND created_at < ?"
+            "WHERE category = ? AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)"
         )
         params = [category, start, end]
 
@@ -117,14 +118,15 @@ def get_month_summary(user_ids: Optional[list[int]] = None) -> list[dict]:
         placeholders = ",".join("?" for _ in user_ids)
         sql = (
             f"SELECT category, {sum_expr} AS total FROM expenses "
-            f"WHERE user_id IN ({placeholders}) AND created_at >= ? AND created_at < ? "
+            f"WHERE user_id IN ({placeholders}) "
+            f"AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?) "
             f"GROUP BY category ORDER BY total DESC"
         )
         params = [*user_ids, start, end]
     else:
         sql = (
             f"SELECT category, {sum_expr} AS total FROM expenses "
-            "WHERE created_at >= ? AND created_at < ? "
+            "WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?) "
             "GROUP BY category ORDER BY total DESC"
         )
         params = [start, end]
@@ -163,7 +165,7 @@ def archive_month(year: int, month: int) -> int:
         # ── Per-user breakdown ──
         rows = conn.execute(
             f"SELECT user_id, category, {sum_expr} AS total FROM expenses "
-            "WHERE created_at >= ? AND created_at < ? "
+            "WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?) "
             "GROUP BY user_id, category",
             (start, end),
         ).fetchall()
@@ -182,7 +184,7 @@ def archive_month(year: int, month: int) -> int:
         # ── Family total (user_id=0) ──
         fam_rows = conn.execute(
             f"SELECT category, {sum_expr} AS total FROM expenses "
-            "WHERE created_at >= ? AND created_at < ? "
+            "WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?) "
             "GROUP BY category",
             (start, end),
         ).fetchall()

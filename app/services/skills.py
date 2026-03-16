@@ -149,30 +149,37 @@ def skill_delete_last(user_id: int, user_name: str, params: dict) -> dict:
 def skill_query_monthly_total(user_id: int, user_name: str, params: dict) -> dict:
     """Query monthly total spending."""
     scope = params.get("scope", "me")
+    if scope == "spouse" and get_spouse_id(user_id) is None:
+        return {"success": False, "message": "未配置配偶账号，无法查询配偶账单"}
     user_ids = resolve_user_ids(scope, user_id)
     total = get_month_total(user_ids)
     label = _scope_label(scope, user_id)
-    return {"label": label, "total": total, "currency": CURRENCY}
+    return {"success": True, "label": label, "total": total, "currency": CURRENCY}
 
 
 def skill_query_category_total(user_id: int, user_name: str, params: dict) -> dict:
     """Query spending for a specific category."""
     scope = params.get("scope", "me")
     category = params.get("category", "其他")
+    if scope == "spouse" and get_spouse_id(user_id) is None:
+        return {"success": False, "message": "未配置配偶账号，无法查询配偶账单"}
     user_ids = resolve_user_ids(scope, user_id)
     total = get_category_total(category, user_ids)
     label = _scope_label(scope, user_id)
-    return {"label": label, "category": category, "total": total, "currency": CURRENCY}
+    return {"success": True, "label": label, "category": category, "total": total, "currency": CURRENCY}
 
 
 def skill_query_summary(user_id: int, user_name: str, params: dict) -> dict:
     """Query monthly summary by category."""
     scope = params.get("scope", "me")
+    if scope == "spouse" and get_spouse_id(user_id) is None:
+        return {"success": False, "message": "未配置配偶账号，无法查询配偶账单"}
     user_ids = resolve_user_ids(scope, user_id)
     summary = get_month_summary(user_ids)
     grand_total = sum(item["total"] for item in summary)
     label = _scope_label(scope, user_id)
     return {
+        "success": True,
         "label": label,
         "summary": summary,
         "grand_total": grand_total,
@@ -253,6 +260,8 @@ def skill_query_budget(user_id: int, user_name: str, params: dict) -> dict:
 def skill_get_spending_analysis(user_id: int, user_name: str, params: dict) -> dict:
     """Get raw spending data for LLM analysis."""
     scope = params.get("scope", "me")
+    if scope == "spouse" and get_spouse_id(user_id) is None:
+        return {"success": False, "message": "未配置配偶账号，无法查询配偶账单"}
     user_ids = resolve_user_ids(scope, user_id)
     summary = get_month_summary(user_ids)
     grand_total = sum(item["total"] for item in summary)
@@ -261,11 +270,12 @@ def skill_get_spending_analysis(user_id: int, user_name: str, params: dict) -> d
     with get_connection() as conn:
         budget_rows = conn.execute(
             "SELECT category, monthly_limit FROM budgets WHERE user_id = ?",
-            (user_id,),
+            (0,),
         ).fetchall()
     budgets = {row["category"]: float(row["monthly_limit"]) for row in budget_rows}
 
     return {
+        "success": True,
         "label": label,
         "summary": summary,
         "grand_total": grand_total,
@@ -294,14 +304,13 @@ def skill_start_event(user_id: int, user_name: str, params: dict) -> dict:
     now = datetime.now(tz)
     with get_connection() as conn:
         for uid in member_ids:
-        # Deactivate all other events first
             conn.execute("UPDATE events SET is_active = 0 WHERE user_id = ?", (uid,))
-        conn.execute(
-            "INSERT INTO events (user_id, tag, description, is_active, created_at) "
-            "VALUES (?, ?, ?, 1, ?) "
-            "ON CONFLICT(user_id, tag) DO UPDATE SET is_active = 1, description = ?, created_at = ?",
+            conn.execute(
+                "INSERT INTO events (user_id, tag, description, is_active, created_at) "
+                "VALUES (?, ?, ?, 1, ?) "
+                "ON CONFLICT(user_id, tag) DO UPDATE SET is_active = 1, description = ?, created_at = ?",
                 (uid, tag, description, now.isoformat(), description, now.isoformat()),
-        )
+            )
         conn.commit()
 
     return {"success": True, "message": f"已为全家开启事件标签「{tag}」，后续记账将自动标记", "tag": tag}
@@ -400,7 +409,9 @@ def skill_query_monthly_archive(user_id: int, user_name: str, params: dict) -> d
         label = get_member_name(user_id)
     elif scope == "spouse":
         sid = get_spouse_id(user_id)
-        uid = sid if sid is not None else user_id
+        if sid is None:
+            return {"success": False, "message": "未配置配偶账号，无法查询配偶账单"}
+        uid = sid
         label = get_member_name(uid)
     else:
         uid = None  # family → user_id=0 in get_monthly_archive
